@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 运行时数据（SQLite db / 拉取的临时 JSON）
+data/
+logs/
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# IDE / 工具
+.atomcode/
+.vscode/
+.idea/
+.DS_Store
+*.log

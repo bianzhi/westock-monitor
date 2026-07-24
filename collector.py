@@ -1,0 +1,515 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""采集层：分钟级差分 + 日级实时拉取 + 板块列表刷新。
+
+数据流：
+  ┌─────────────┐   ┌──────────────┐   ┌─────────────┐
+  │ westock CLI  │──▶│  collector   │──▶│  storage    │
+  │ (MainNetFlow)│   │  (差分/聚合) │   │  (SQLite)   │
+  └─────────────┘   └──────────────┘   └─────────────┘
+  ┌─────────────┐         ▲
+  │ 腾讯HTTP     │─────────┘
+  │ (turnover/   │
+  │  circ_mv)    │
+  └─────────────┘
+
+核心 API:
+  - refresh_sectors() -> int
+      从接口刷新板块列表，返回数量
+  - collect_minute_snapshot() -> Dict
+      采集一次分钟级快照（主力净流入 + 成交额 + 流通市值），差分后入库
+  - collect_daily_records(code, n) -> List[Dict]
+      实时拉取单板块近n日日级记录（今日+前n-1日）
+  - collect_all_sectors_daily(n) -> Dict
+      拉取所有板块近n日日级数据（用于宽表展示）
+  - run_minute_loop(force=False)
+      分钟级采集主循环
+
+关键设计：
+  1. 日级数据"能从接口获取的统统从接口获取"，本地不长期存
+     - 今日净流入/成交额/流通市值：实时调 westock fund flow + 腾讯HTTP
+     - 近3日/近5日净流入/净额率：优先调 westock MainNetFlow5D 等累计字段
+     - 计算不到的：用本地缓存的分钟数据聚合回填
+  2. 分钟级数据本地缓存最近5日，差分得到分钟净流入
+  3. 板块列表刷新：search 反查 + 硬编码兜底
+"""
+import json
+import logging
+import threading
+import time
+from datetime import datetime, date, timedelta
+from typing import Any, Dict, List, Optional, Tuple
+
+from config import (
+    BASE_DIR, DATA_DIR, SECTORS_CACHE, MINUTE_INTERVAL, IDLE_SLEEP,
+    TRADING_MORNING, TRADING_AFTERNOON, STRENGTH_WINDOW_N, DISPLAY_DAYS,
+    SUMMARY_3D, SUMMARY_5D, MINUTE_CACHE_DAYS, get_scale,
+)
+from sectors import DEFAULT_SECTORS, get_default_codes, get_default_sector_map
+from westock import (
+    fund_flow, sector_ranking, search_sector,
+    extract_main_net_flow, extract_main_inflow, extract_main_outflow,
+)
+from westock_fund_metrics import (
+    calc_sector_metrics, calc_sector_metrics_batch,
+    calc_turnover, calc_net_rate,
+    extract_main_net_flow, extract_main_inflow, extract_main_outflow,
+)
+from strength import (
+    calc_strength, calc_aggregate_net_rate, calc_aggregate_net_flow,
+    calc_sector_strength,
+)
+
+logger = logging.getLogger(__name__)
+
+# 单例 storage，延迟导入避免循环依赖
+_storage = None
+_storage_lock = threading.Lock()
+
+
+def get_storage():
+    """延迟初始化 storage 单例。"""
+    global _storage
+    if _storage is None:
+        with _storage_lock:
+            if _storage is None:
+                from storage import Storage
+                _storage = Storage()
+    return _storage
+
+
+# ============================================================
+# 板块列表刷新
+# ============================================================
+def refresh_sectors() -> int:
+    """从接口刷新板块列表，写入 data/sectors.json。
+
+    策略：
+      1. 遍历 31 个一级行业名，调 search --type sector
+      2. 过滤 分类="申万二级行业清单" 的条目
+      3. 合并去重，按代码排序
+      4. 失败兜底用 DEFAULT_SECTORS
+
+    Returns:
+        刷新后的板块数量
+    """
+    logger.info("refresh_sectors: 开始从接口拉取板块列表")
+
+    # 31 个申万一级行业名
+    l1_names = sorted({s["l1"] for s in DEFAULT_SECTORS})
+
+    found: Dict[str, Dict] = {}
+    for l1 in l1_names:
+        try:
+            results = search_sector(l1, raw=True)
+            if not isinstance(results, list):
+                continue
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                # 只收申万二级
+                category = item.get("分类") or item.get("category") or ""
+                if "申万二级" not in category:
+                    continue
+                code = item.get("code") or item.get("SecuCode")
+                name = item.get("name") or item.get("Name")
+                if code and name:
+                    found[code] = {
+                        "code": code, "name": name, "l1": l1,
+                        "category": category,
+                    }
+        except Exception as e:
+            logger.warning("refresh_sectors search %s failed: %s", l1, e)
+
+    # 兜底：如果接口失败，用默认列表
+    if not found:
+        logger.warning("refresh_sectors: 接口未返回数据，使用默认列表")
+        sectors_data = {"sectors": DEFAULT_SECTORS, "updated_at": datetime.now().isoformat(), "source": "default"}
+    else:
+        sectors_list = sorted(found.values(), key=lambda x: x["code"])
+        sectors_data = {
+            "sectors": sectors_list,
+            "updated_at": datetime.now().isoformat(),
+            "source": "tencent_api",
+            "count": len(sectors_list),
+        }
+
+    try:
+        with open(SECTORS_CACHE, "w", encoding="utf-8") as f:
+            json.dump(sectors_data, f, ensure_ascii=False, indent=2)
+        logger.info("refresh_sectors: 完成，共 %d 个板块", len(sectors_data.get("sectors", [])))
+    except Exception as e:
+        logger.error("refresh_sectors: 写入缓存失败: %s", e)
+        return 0
+
+    return len(sectors_data.get("sectors", []))
+
+
+def load_sectors() -> List[Dict]:
+    """加载板块列表，优先缓存，否则用默认。"""
+    try:
+        if SECTORS_CACHE.exists():
+            with open(SECTORS_CACHE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("sectors", DEFAULT_SECTORS)
+    except Exception as e:
+        logger.warning("load_sectors: 读取缓存失败: %s", e)
+    return DEFAULT_SECTORS
+
+
+def get_sector_codes() -> List[str]:
+    """获取当前板块代码列表。"""
+    return [s["code"] for s in load_sectors()]
+
+
+# ============================================================
+# 交易时段判断
+# ============================================================
+def is_trading_time(now: Optional[datetime] = None) -> bool:
+    """判断当前是否为 A 股交易时段。"""
+    now = now or datetime.now()
+    h, m = now.hour, now.minute
+    minutes = h * 60 + m
+
+    # 周末
+    if now.weekday() >= 5:
+        return False
+
+    # 上午 9:30-11:30
+    start = TRADING_MORNING[0] * 60 + TRADING_MORNING[1]
+    end = TRADING_MORNING[2] * 60 + TRADING_MORNING[3]
+    if start <= minutes <= end:
+        return True
+
+    # 下午 13:00-15:00
+    start = TRADING_AFTERNOON[0] * 60 + TRADING_AFTERNOON[1]
+    end = TRADING_AFTERNOON[2] * 60 + TRADING_AFTERNOON[3]
+    if start <= minutes <= end:
+        return True
+
+    return False
+
+
+# ============================================================
+# 分钟级采集
+# ============================================================
+def collect_minute_snapshot() -> Dict[str, Any]:
+    """采集一次分钟级快照。
+
+    步骤：
+      1. 调 westock fund flow 批量拿 MainNetFlow (累计)
+      2. 调腾讯 HTTP 拿 turnover (成交额) + circ_mv (流通市值)
+      3. 与上一分钟快照差分，得本分钟净流入
+      4. 入库 storage.upsert_minute_snapshot
+
+    Returns:
+        {"timestamp": "...", "sectors_collected": N, "errors": [...]}
+    """
+    storage = get_storage()
+    codes = get_sector_codes()
+    if not codes:
+        logger.warning("collect_minute_snapshot: no sector codes")
+        return {"timestamp": datetime.now().isoformat(), "sectors_collected": 0, "errors": ["no_codes"]}
+
+    ts = datetime.now()
+    logger.info("collect_minute_snapshot: start at %s, codes=%d", ts.isoformat(), len(codes))
+
+    # 1. westock fund flow 批量
+    flow_records = fund_flow(codes, raw=True)
+    flow_map: Dict[str, Dict] = {}
+    for r in flow_records:
+        code = r.get("code") or r.get("SecuCode")
+        if code:
+            flow_map[code] = r
+
+    # 2. 成交额自算（fund flow 的 MainInFlow + MainOutFlow）
+    #    腾讯原 HTTP 接口已死，净额率改用 westock 自身字段计算
+    metrics_map: Dict[str, Dict] = {}
+    for r in flow_records:
+        code = r.get("code") or r.get("SecuCode")
+        if code:
+            metrics_map[code] = calc_sector_metrics(r, "main")
+
+    # 3. 组装快照 + 差分
+    snapshot_list: List[Dict] = []
+    prev_snapshot = storage.get_last_minute_snapshot()  # {code: {main_net_flow, ...}}
+
+    for code in codes:
+        flow = flow_map.get(code, {})
+        metrics = metrics_map.get(code, {})
+
+        # 主力净流入累计值 (元)
+        main_net_flow = extract_main_net_flow(flow)
+        # 成交额 (元) —— 自算
+        turnover = metrics.get("turnover")
+        # 流通市值 (元) —— fund flow 不提供，留空
+        circ_mv = None
+
+        # 差分：本分钟净流入 = 本分钟累计 - 上分钟累计
+        minute_delta = None
+        prev = prev_snapshot.get(code)
+        if prev and main_net_flow is not None:
+            prev_mnf = prev.get("main_net_flow")
+            if prev_mnf is not None:
+                minute_delta = main_net_flow - prev_mnf
+
+        snapshot_list.append({
+            "code": code,
+            "timestamp": ts,
+            "main_net_flow": main_net_flow,      # 当日累计 (元)
+            "turnover": turnover,                # 当日累计成交额 (元，自算)
+            "circ_mv": circ_mv,                  # 流通市值(暂缺)
+            "minute_delta": minute_delta,        # 本分钟净流入增量 (元)
+            "main_inflow": extract_main_inflow(flow),
+            "main_outflow": extract_main_outflow(flow),
+        })
+
+    # 4. 入库
+    storage.upsert_minute_snapshots(snapshot_list)
+    # 清理过期分钟数据
+    storage.cleanup_old_minute_data(MINUTE_CACHE_DAYS)
+
+    errors = []
+    if len(flow_map) < len(codes) * 0.5:
+        errors.append("westock_low_coverage")
+
+    logger.info(
+        "collect_minute_snapshot: done, flow=%d, errors=%s",
+        len(flow_map), errors,
+    )
+
+    return {
+        "timestamp": ts.isoformat(),
+        "sectors_collected": len(snapshot_list),
+        "flow_coverage": len(flow_map),
+        "errors": errors,
+    }
+
+
+# ============================================================
+# 日级数据采集（实时拉取，不长期落地）
+# ============================================================
+def collect_daily_records(code: str, n: int = 5) -> List[Dict]:
+    """实时拉取单板块近n日日级记录。
+
+    策略（你定的"优先接口获取，获取不到的计算"）：
+      1. 今日数据：调 westock fund flow + 腾讯 HTTP，拿今日净流入/成交额/流通市值
+      2. 近n日累计：调 westock MainNetFlow5D/10D/20D（接口能给的）
+      3. 单日历史 T-1/T-2/...：westock 不直接给单日历史，
+         用近5日累计 - 近4日累计 反推（但 westock 只给5/10/20档，没4日）
+         → 此处改用腾讯HTTP接口的成交额 + westock 累计差分
+      4. 简化实现：今日实时，历史用 MainNetFlow5D/10D 平均估算
+
+    实测 westock fund flow 返回字段：
+      MainNetFlow (今日累计净流入, 元)
+      MainNetFlow5D (近5日累计净流入, 元)
+      MainNetFlow10D (近10日累计净流入, 元)
+      MainNetFlow20D (近20日累计净流入, 元)
+
+    Args:
+        code: 板块代码
+        n: 天数
+
+    Returns:
+        日记录列表，按时间倒序（今日在前），每条含:
+          date, net_flow(元), turnover(元), main_net_flow_5d, main_net_flow_10d
+    """
+    records: List[Dict] = []
+    today = date.today()
+
+    # 1. 今日实时：westock fund flow
+    flow_records = fund_flow([code], raw=True)
+    flow = flow_records[0] if flow_records else {}
+    metrics = calc_sector_metrics(flow, "main") if flow else {}
+
+    today_net = extract_main_net_flow(flow)
+    today_turnover = metrics.get("turnover")
+    today_circ_mv = None  # fund flow 不提供流通市值
+    net_5d = _safe_float(flow.get("MainNetFlow5D"))
+    net_10d = _safe_float(flow.get("MainNetFlow10D"))
+    net_20d = _safe_float(flow.get("MainNetFlow20D"))
+
+    records.append({
+        "date": today.isoformat(),
+        "trade_date": today.strftime("%Y%m%d"),
+        "net_flow": today_net,                  # 今日主力净流入 (元)
+        "turnover": today_turnover,             # 今日成交额 (元，自算)
+        "circ_mv": today_circ_mv,               # 流通市值 (暂缺)
+        "main_net_flow_5d": net_5d,             # 近5日累计 (元)
+        "main_net_flow_10d": net_10d,           # 近10日累计 (元)
+        "main_net_flow_20d": net_20d,           # 近20日累计 (元)
+    })
+
+    # 2. 历史 T-1..T-(n-1) 日：westock 不给单日历史，用累计差分
+    #    MainNetFlow5D = T-4..T 的累计，所以 T-1 单日 = 5D - (T-2..T-4)？
+    #    实际 westock 只给 5D/10D/20D，没法逐日拆。
+    #    方案：用累计值倒推平均，标记 estimated=True
+    if n > 1 and net_5d is not None and today_net is not None:
+        # 近4日累计 = 5D - 今日
+        net_4d = net_5d - today_net
+        # 平均到 T-1..T-4
+        avg_daily = net_4d / (n - 1) if (n - 1) > 0 else 0
+        for i in range(1, n):
+            d = today - timedelta(days=i)
+            records.append({
+                "date": d.isoformat(),
+                "trade_date": d.strftime("%Y%m%d"),
+                "net_flow": round(avg_daily, 2),  # 估算
+                "turnover": None,                 # 历史成交额未知
+                "circ_mv": today_circ_mv,         # 用今日流通市值近似
+                "main_net_flow_5d": net_5d,
+                "main_net_flow_10d": net_10d,
+                "main_net_flow_20d": net_20d,
+                "estimated": True,
+            })
+
+    logger.debug("collect_daily_records %s: %d records", code, len(records))
+    return records
+
+
+def collect_all_sectors_daily(n: int = 5) -> Tuple[Dict[str, List[Dict]], Dict[str, float]]:
+    """拉取所有板块近n日日级数据 + 流通市值。
+
+    优化：
+      - 今日实时：批量 westock + 批量腾讯
+      - 历史 T-1..T-(n-1)：从批量结果中用累计差分估算
+
+    Returns:
+        (daily_map, circ_mv_map)
+        daily_map: {code: [日记录...]}
+        circ_mv_map: {code: 流通市值(元)}
+    """
+    codes = get_sector_codes()
+    if not codes:
+        return {}, {}
+
+    logger.info("collect_all_sectors_daily: start, codes=%d, n=%d", len(codes), n)
+
+    # 批量 westock fund flow
+    flow_records = fund_flow(codes, raw=True)
+    flow_map: Dict[str, Dict] = {}
+    metrics_map: Dict[str, Dict] = {}
+    for r in flow_records:
+        code = r.get("code") or r.get("SecuCode")
+        if code:
+            flow_map[code] = r
+            metrics_map[code] = calc_sector_metrics(r, "main")
+
+    today = date.today()
+    daily_map: Dict[str, List[Dict]] = {}
+    circ_mv_map: Dict[str, float] = {}  # fund flow 不提供流通市值，暂空
+
+    for code in codes:
+        flow = flow_map.get(code, {})
+        metrics = metrics_map.get(code, {})
+
+        today_net = extract_main_net_flow(flow)
+        today_turnover = metrics.get("turnover")
+        today_circ_mv = None  # fund flow 不提供流通市值
+        net_5d = _safe_float(flow.get("MainNetFlow5D"))
+        net_10d = _safe_float(flow.get("MainNetFlow10D"))
+        net_20d = _safe_float(flow.get("MainNetFlow20D"))
+
+        records: List[Dict] = []
+        records.append({
+            "date": today.isoformat(),
+            "trade_date": today.strftime("%Y%m%d"),
+            "net_flow": today_net,
+            "turnover": today_turnover,
+            "circ_mv": today_circ_mv,
+            "main_net_flow_5d": net_5d,
+            "main_net_flow_10d": net_10d,
+            "main_net_flow_20d": net_20d,
+        })
+
+        # 历史 T-1..T-(n-1)：用累计差分估算
+        if n > 1 and net_5d is not None and today_net is not None:
+            net_4d = net_5d - today_net
+            avg_daily = net_4d / (n - 1) if (n - 1) > 0 else 0
+            for i in range(1, n):
+                d = today - timedelta(days=i)
+                records.append({
+                    "date": d.isoformat(),
+                    "trade_date": d.strftime("%Y%m%d"),
+                    "net_flow": round(avg_daily, 2),
+                    "turnover": None,
+                    "circ_mv": today_circ_mv,
+                    "main_net_flow_5d": net_5d,
+                    "main_net_flow_10d": net_10d,
+                    "main_net_flow_20d": net_20d,
+                    "estimated": True,
+                })
+
+        daily_map[code] = records
+
+    logger.info(
+        "collect_all_sectors_daily: done, flow=%d, circ_mv=%d",
+        len(flow_map), len(circ_mv_map),
+    )
+    return daily_map, circ_mv_map
+
+
+# ============================================================
+# 分钟级采集主循环
+# ============================================================
+def run_minute_loop(force: bool = False) -> None:
+    """分钟级采集主循环。
+
+    Args:
+        force: True 时非交易时段也跑（用于测试）
+    """
+    logger.info("=== collector minute loop started (force=%s) ===", force)
+
+    while True:
+        now = datetime.now()
+        trading = is_trading_time(now)
+
+        if not trading and not force:
+            time.sleep(IDLE_SLEEP)
+            continue
+
+        try:
+            result = collect_minute_snapshot()
+            logger.info("minute snapshot: %s", result)
+        except Exception as e:
+            logger.error("minute loop error: %s", e, exc_info=True)
+
+        # 等待下一分钟
+        time.sleep(MINUTE_INTERVAL)
+
+
+# ============================================================
+# 工具
+# ============================================================
+def _safe_float(v: Any) -> Optional[float]:
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    import sys
+    if "--refresh-sectors" in sys.argv:
+        n = refresh_sectors()
+        print(f"refreshed sectors: {n}")
+    elif "--test-minute" in sys.argv:
+        r = collect_minute_snapshot()
+        print(json.dumps(r, ensure_ascii=False, indent=2))
+    elif "--test-daily" in sys.argv:
+        daily_map, circ_mv_map = collect_all_sectors_daily(n=5)
+        print(f"sectors: {len(daily_map)}, circ_mv: {len(circ_mv_map)}")
+        # 打印第一个
+        if daily_map:
+            code = next(iter(daily_map))
+            print(f"\n{code} daily records:")
+            print(json.dumps(daily_map[code], ensure_ascii=False, indent=2, default=str))
+    else:
+        print("Usage:")
+        print("  python collector.py --refresh-sectors")
+        print("  python collector.py --test-minute")
+        print("  python collector.py --test-daily")
