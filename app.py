@@ -44,6 +44,7 @@ from collector import (
     collect_minute_snapshot, collect_all_sectors_daily,
     collect_daily_records, is_trading_time,
 )
+from circ_mv_collector import collect_all_sectors_circ_mv
 from strength import (
     calc_strength, calc_aggregate_net_rate, calc_aggregate_net_flow,
     calc_sector_strength, level_to_color,
@@ -165,19 +166,37 @@ def _ensure_meta() -> int:
 
 
 def _update_meta_with_realtime(daily_map: Dict, circ_mv_map: Dict) -> None:
-    """用实时采集的数据更新 sector_meta 的 circ_mv / turnover。"""
+    """用实时采集的数据更新 sector_meta 的 circ_mv / turnover。
+
+    流通市值优先级：
+        1. sector_circ_mv 缓存表（成分股反推累加，最准）
+        2. 今日 fund flow 实时 circ_mv（实测板块级全为 0，兜底）
+        3. sector_meta 已有 circ_mv_yi（兜底）
+    """
     if not daily_map:
         return
     storage = get_storage()
+    # 优先读 sector_circ_mv 缓存（今日 → 历史最新）
+    today_str = date.today().strftime("%Y%m%d")
+    circ_mv_cache_today = storage.get_all_sector_circ_mv(today_str)
+    circ_mv_cache_latest = storage.get_latest_sector_circ_mv()
+
     meta_list = []
     for code, records in daily_map.items():
         if not records:
             continue
         today = records[0]
-        circ_mv = today.get("circ_mv")   # 元
-        turnover = today.get("turnover") # 元
-        circ_mv_yi = _to_yi(circ_mv) if circ_mv else None
+        turnover = today.get("turnover")  # 元
         turnover_yi = _to_yi(turnover) if turnover else None
+
+        # 流通市值优先级
+        circ_mv_yi = None
+        cached = circ_mv_cache_today.get(code) or circ_mv_cache_latest.get(code)
+        if cached and cached.get("circ_mv_yi"):
+            circ_mv_yi = cached["circ_mv_yi"]
+        elif today.get("circ_mv"):
+            circ_mv_yi = _to_yi(today.get("circ_mv"))
+
         meta_list.append({
             "code": code,
             "circ_mv_yi": circ_mv_yi,
@@ -321,7 +340,11 @@ async def get_sector_detail(
         raise HTTPException(status_code=404, detail=f"sector {code} not found")
 
     records = collect_daily_records(code, n=n)
+    # 流通市值优先级：sector_circ_mv 缓存 → sector_meta
     circ_mv_yi = meta.get("circ_mv_yi")
+    cached_mv = storage.get_sector_circ_mv(code)
+    if cached_mv and cached_mv.get("circ_mv_yi"):
+        circ_mv_yi = cached_mv["circ_mv_yi"]
 
     strength = _calc_strength_from_records(records, circ_mv_yi, n)
     history = _build_history(records, None, n)
@@ -489,6 +512,39 @@ async def api_collect_minute():
         return {"status": "ok", "result": result}
     except Exception as e:
         logger.error("manual minute collect failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/collect/circ-mv")
+async def api_collect_circ_mv():
+    """手动触发一次流通市值采集（成分股反推累加）。
+
+    采集全部 134 板块的成分股 → 个股 fund flow 反推 → 累加写入 sector_circ_mv 缓存。
+    耗时较长（约 30-60s），建议盘前/盘后各执行一次。
+    """
+    try:
+        from circ_mv_collector import collect_all_sectors_circ_mv
+        from sectors import get_default_codes
+        storage = get_storage()
+
+        result_map = collect_all_sectors_circ_mv()
+
+        # 写入 sector_circ_mv 缓存表
+        records = []
+        for code, info in result_map.items():
+            info["code"] = code
+            records.append(info)
+        n_written = storage.upsert_sector_circ_mv(records)
+
+        valid = sum(1 for v in result_map.values() if v.get("circ_mv") is not None)
+        return {
+            "status": "ok",
+            "total": len(result_map),
+            "valid": valid,
+            "written": n_written,
+        }
+    except Exception as e:
+        logger.error("manual circ_mv collect failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -44,6 +44,7 @@ from config import (
     BASE_DIR, DATA_DIR, SECTORS_CACHE, MINUTE_INTERVAL, IDLE_SLEEP,
     TRADING_MORNING, TRADING_AFTERNOON, STRENGTH_WINDOW_N, DISPLAY_DAYS,
     SUMMARY_3D, SUMMARY_5D, MINUTE_CACHE_DAYS, get_scale,
+    CIRC_MV_COLLECT_TIMES, CIRC_MV_CHECK_INTERVAL,
 )
 from sectors import DEFAULT_SECTORS, get_default_codes, get_default_sector_map
 from westock import (
@@ -479,6 +480,108 @@ def run_minute_loop(force: bool = False) -> None:
 
 
 # ============================================================
+# 流通市值日级采集
+# ============================================================
+def collect_circ_mv_snapshot() -> Dict[str, Any]:
+    """采集一次全板块流通市值快照（成分股反推累加），写入 sector_circ_mv 缓存。
+
+    Returns:
+        {"timestamp": "...", "total": N, "valid": N, "written": N}
+    """
+    from circ_mv_collector import collect_all_sectors_circ_mv, _get_tushare_pro
+    storage = get_storage()
+
+    ts = datetime.now()
+    # 启动日志显示数据源方案（Tushare 直取 / westock 反推兜底）
+    has_tushare = _get_tushare_pro() is not None
+    logger.info("collect_circ_mv_snapshot: start at %s, source=%s",
+                ts.isoformat(), "tushare" if has_tushare else "westock_reverse")
+
+    try:
+        result_map = collect_all_sectors_circ_mv()
+    except Exception as e:
+        logger.error("collect_circ_mv_snapshot: collect failed: %s", e, exc_info=True)
+        return {"timestamp": ts.isoformat(), "total": 0, "valid": 0, "written": 0, "error": str(e)}
+
+    # 写入缓存表
+    records = []
+    for code, info in result_map.items():
+        info["code"] = code
+        records.append(info)
+    n_written = storage.upsert_sector_circ_mv(records)
+
+    valid = sum(1 for v in result_map.values() if v.get("circ_mv") is not None)
+    logger.info(
+        "collect_circ_mv_snapshot: done, total=%d, valid=%d, written=%d",
+        len(result_map), valid, n_written,
+    )
+    return {
+        "timestamp": ts.isoformat(),
+        "total": len(result_map),
+        "valid": valid,
+        "written": n_written,
+    }
+
+
+def _parse_circ_mv_times() -> List[str]:
+    """解析 CIRC_MV_COLLECT_TIMES 配置，返回 ["HH:MM", ...]。"""
+    times = []
+    for part in CIRC_MV_COLLECT_TIMES.split(","):
+        part = part.strip()
+        if part:
+            times.append(part)
+    return times
+
+
+def run_circ_mv_loop(force: bool = False) -> None:
+    """流通市值日级采集主循环。
+
+    按 CIRC_MV_COLLECT_TIMES 时点每日触发一次（默认 09:15 + 15:05）。
+    每日每个时点最多触发一次，避免重复采集。
+
+    Args:
+        force: True 时忽略时点判断立即跑一次（用于测试），之后正常循环
+    """
+    logger.info("=== collector circ_mv loop started, times=%s ===", CIRC_MV_COLLECT_TIMES)
+
+    # 已触发时点记录（date -> set(HH:MM)），避免同一天同一时点重复触发
+    fired: Dict[str, set] = {}
+    target_times = _parse_circ_mv_times()
+
+    if force:
+        try:
+            result = collect_circ_mv_snapshot()
+            logger.info("circ_mv force snapshot: %s", result)
+        except Exception as e:
+            logger.error("circ_mv force snapshot error: %s", e, exc_info=True)
+
+    while True:
+        now = datetime.now()
+        today_str = now.strftime("%Y%m%d")
+        now_hm = now.strftime("%H:%M")
+
+        # 检查是否命中采集时点且今日未触发
+        if now_hm in target_times:
+            fired_today = fired.setdefault(today_str, set())
+            if now_hm not in fired_today:
+                logger.info("circ_mv loop: hit schedule %s, triggering", now_hm)
+                try:
+                    result = collect_circ_mv_snapshot()
+                    logger.info("circ_mv snapshot: %s", result)
+                except Exception as e:
+                    logger.error("circ_mv loop error: %s", e, exc_info=True)
+                finally:
+                    fired_today.add(now_hm)
+
+        # 清理过期日期记录（只保留今日）
+        expired = [d for d in fired if d != today_str]
+        for d in expired:
+            fired.pop(d, None)
+
+        time.sleep(CIRC_MV_CHECK_INTERVAL)
+
+
+# ============================================================
 # 工具
 # ============================================================
 def _safe_float(v: Any) -> Optional[float]:
@@ -508,8 +611,25 @@ if __name__ == "__main__":
             code = next(iter(daily_map))
             print(f"\n{code} daily records:")
             print(json.dumps(daily_map[code], ensure_ascii=False, indent=2, default=str))
+    elif "--test-circ-mv" in sys.argv:
+        # 一次性采集全板块流通市值，写入 sector_circ_mv 缓存
+        r = collect_circ_mv_snapshot()
+        print(json.dumps(r, ensure_ascii=False, indent=2, default=str))
+    elif "--circ-mv-loop" in sys.argv:
+        # 流通市值日级采集主循环
+        run_circ_mv_loop(force="--force" in sys.argv)
     else:
         print("Usage:")
         print("  python collector.py --refresh-sectors")
         print("  python collector.py --test-minute")
         print("  python collector.py --test-daily")
+        print("  python collector.py --test-circ-mv           # 一次性采集流通市值")
+        print("  python collector.py --circ-mv-loop [--force] # 日级采集主循环")
+        print()
+        print("可用的采集函数:")
+        print("  collect_circ_mv_snapshot()   # 一次性流通市值采集")
+        print("  run_circ_mv_loop(force=False)  # 日级采集主循环")
+        print()
+        print("环境变量:")
+        print('  CIRC_MV_COLLECT_TIMES=09:15,15:05  # 采集时点')
+        print('  CIRC_MV_CHECK_INTERVAL=300          # 时点检查间隔(秒)')

@@ -64,6 +64,14 @@ STRENGTH_LEVELS = ["强", "偏强", "普通", "偏弱", "弱"]
 MINUTE_INTERVAL = int(os.getenv("MINUTE_INTERVAL", "60"))   # 分钟级采集间隔(秒)
 IDLE_SLEEP = int(os.getenv("IDLE_SLEEP", "30"))             # 非交易时段轮询间隔(秒)
 
+# 流通市值日级采集时点（24h 制，HH:MM，逗号分隔）
+# 实测成分股反推累加耗时约 30-60s，盘前+盘后各一次足够
+CIRC_MV_COLLECT_TIMES = os.getenv(
+    "CIRC_MV_COLLECT_TIMES", "09:15,15:05"
+)
+# 流通市值日级采集兜底间隔（若时点配置未命中，每 N 秒检查一次时点）
+CIRC_MV_CHECK_INTERVAL = int(os.getenv("CIRC_MV_CHECK_INTERVAL", "300"))
+
 # ============================================================
 # 数据保留策略
 # ============================================================

@@ -93,6 +93,34 @@ class Storage:
                 )
             """)
 
+            # 板块流通市值缓存表（日级，成分股累加）
+            # source: tushare (主方案，个股 circ_mv 直取) / westock_reverse (兜底，反推) / mixed / unknown
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS sector_circ_mv (
+                    code            TEXT NOT NULL,
+                    trade_date      TEXT NOT NULL,      -- YYYYMMDD
+                    circ_mv         REAL,               -- 流通市值(元)
+                    circ_mv_yi      REAL,               -- 流通市值(亿元)
+                    stock_count     INTEGER,            -- 成分股数
+                    valid_count     INTEGER,            -- 有效累加数
+                    skip_count      INTEGER,            -- 跳过数
+                    fail_rate       REAL,               -- 失败率
+                    is_estimated    INTEGER,            -- 0/1 是否估算值
+                    source          TEXT,               -- 数据来源 tushare/westock_reverse/mixed/unknown
+                    updated_at      TEXT,
+                    PRIMARY KEY (code, trade_date)
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_circ_mv_date
+                ON sector_circ_mv(trade_date)
+            """)
+            # 旧表无 source 列时补列（兼容升级）
+            try:
+                cur.execute("ALTER TABLE sector_circ_mv ADD COLUMN source TEXT")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
+
             # 分钟快照表（差分前的当日累计值）
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS minute_snapshot (
@@ -405,6 +433,151 @@ class Storage:
                 "SELECT code, circ_mv_yi FROM sector_meta WHERE circ_mv_yi IS NOT NULL"
             )
             return {row["code"]: row["circ_mv_yi"] for row in cur.fetchall()}
+
+    # ============================================================
+    # 板块流通市值缓存（日级，成分股反推累加）
+    # ============================================================
+    def upsert_sector_circ_mv(self, records: List[Dict]) -> int:
+        """批量写入/更新板块流通市值缓存。
+
+        Args:
+            records: 流通市值记录列表，每条含:
+              code, trade_date(YYYYMMDD), circ_mv(元), circ_mv_yi(亿元),
+              stock_count, valid_count, skip_count, fail_rate,
+              is_estimated(0/1), source(tushare/westock_reverse/mixed/unknown)
+
+        Returns:
+            写入行数
+        """
+        if not records:
+            return 0
+
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            count = 0
+            now_iso = datetime.now().isoformat()
+
+            for r in records:
+                code = r.get("code")
+                trade_date = r.get("trade_date")
+                if not code or not trade_date:
+                    continue
+                try:
+                    cur.execute("""
+                        INSERT INTO sector_circ_mv
+                            (code, trade_date, circ_mv, circ_mv_yi,
+                             stock_count, valid_count, skip_count,
+                             fail_rate, is_estimated, source, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(code, trade_date) DO UPDATE SET
+                            circ_mv = excluded.circ_mv,
+                            circ_mv_yi = excluded.circ_mv_yi,
+                            stock_count = excluded.stock_count,
+                            valid_count = excluded.valid_count,
+                            skip_count = excluded.skip_count,
+                            fail_rate = excluded.fail_rate,
+                            is_estimated = excluded.is_estimated,
+                            source = excluded.source,
+                            updated_at = excluded.updated_at
+                    """, (
+                        code, trade_date,
+                        r.get("circ_mv"), r.get("circ_mv_yi"),
+                        r.get("stock_count"), r.get("valid_count"),
+                        r.get("skip_count"), r.get("fail_rate"),
+                        1 if r.get("is_estimated") else 0,
+                        r.get("source") or "unknown",
+                        now_iso,
+                    ))
+                    count += 1
+                except sqlite3.Error as e:
+                    logger.warning("upsert_sector_circ_mv %s: %s", code, e)
+
+            conn.commit()
+        logger.debug("upsert_sector_circ_mv: %d/%d", count, len(records))
+        return count
+
+    def get_sector_circ_mv(
+        self, code: str, trade_date: Optional[str] = None
+    ) -> Optional[Dict]:
+        """获取单板块流通市值缓存。
+
+        Args:
+            code: 板块 pt 代码
+            trade_date: YYYYMMDD，默认今日
+
+        Returns:
+            流通市值记录 dict 或 None
+        """
+        if trade_date is None:
+            trade_date = date.today().strftime("%Y%m%d")
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT * FROM sector_circ_mv WHERE code = ? AND trade_date = ?",
+                (code, trade_date),
+            )
+            row = cur.fetchone()
+            if row:
+                d = dict(row)
+                d["is_estimated"] = bool(d.get("is_estimated"))
+                return d
+            return None
+
+    def get_all_sector_circ_mv(
+        self, trade_date: Optional[str] = None
+    ) -> Dict[str, Dict]:
+        """获取全部板块流通市值缓存。
+
+        Args:
+            trade_date: YYYYMMDD，默认今日
+
+        Returns:
+            {code: {circ_mv, circ_mv_yi, is_estimated, ...}, ...}
+        """
+        if trade_date is None:
+            trade_date = date.today().strftime("%Y%m%d")
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT * FROM sector_circ_mv WHERE trade_date = ?",
+                (trade_date,),
+            )
+            result = {}
+            for row in cur.fetchall():
+                d = dict(row)
+                d["is_estimated"] = bool(d.get("is_estimated"))
+                result[d["code"]] = d
+            return result
+
+    def get_latest_sector_circ_mv(self) -> Dict[str, Dict]:
+        """获取每个板块最新一日的流通市值缓存。
+
+        用于盘前/盘后无当日数据时的兜底。
+
+        Returns:
+            {code: {circ_mv, circ_mv_yi, trade_date, is_estimated, ...}, ...}
+        """
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT c.* FROM sector_circ_mv c
+                INNER JOIN (
+                    SELECT code, MAX(trade_date) AS max_date
+                    FROM sector_circ_mv
+                    GROUP BY code
+                ) latest
+                ON c.code = latest.code AND c.trade_date = latest.max_date
+            """)
+            result = {}
+            for row in cur.fetchall():
+                d = dict(row)
+                d["is_estimated"] = bool(d.get("is_estimated"))
+                result[d["code"]] = d
+            return result
 
     # ============================================================
     # 数据清理

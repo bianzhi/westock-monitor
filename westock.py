@@ -161,6 +161,76 @@ def sector_valuation(code: str, raw: bool = True) -> Optional[Dict]:
     return None
 
 
+def sector_constituent(codes: Union[str, List[str]], raw: bool = True) -> Dict[str, List[Dict]]:
+    """批量查板块成分股。
+
+    Args:
+        codes: 单个 pt 代码或代码列表
+        raw: 是否输出 JSON
+
+    Returns:
+        {pt_code: [{code, name, SectorCode}, ...], ...}
+        顺序与请求顺序一致
+
+    实测（重要 bug 规避）：
+        - westock 多板块查询时，返回的 sections 顺序与请求顺序**不一致**
+          （实测请求 [81,16,12] 返回 sections=[12的数据,16的数据,81的数据]）
+        - 但每只成分股的 SectorCode 字段标识了它所属板块
+        - 本函数按 SectorCode 反向聚合，确保结果与请求顺序对齐
+    """
+    if isinstance(codes, str):
+        codes = [codes]
+    if not codes:
+        return {}
+
+    codes_str = ",".join(codes)
+    data = westock("sector", "constituent", codes_str, raw=raw)
+
+    # 初始化结果（保持请求顺序）
+    result: Dict[str, List[Dict]] = {c: [] for c in codes}
+
+    if isinstance(data, dict) and "sections" in data:
+        # 按 SectorCode 字段反向聚合，规避 sections 顺序不一致 bug
+        for sec in data["sections"]:
+            if not isinstance(sec, list):
+                continue
+            for item in sec:
+                if not isinstance(item, dict):
+                    continue
+                pt = item.get("SectorCode")
+                if pt in result:
+                    result[pt].append(item)
+    elif isinstance(data, list):
+        # 单板块返回 list 时
+        if len(codes) == 1:
+            result[codes[0]] = data
+        else:
+            # 多板块但返回 list（异常情况），按 SectorCode 聚合
+            for item in data:
+                if isinstance(item, dict):
+                    pt = item.get("SectorCode")
+                    if pt in result:
+                        result[pt].append(item)
+
+    return result
+
+
+def extract_main_inflow_circ_rate(record: Dict) -> Optional[float]:
+    """从 fund flow 单条记录提取 MainInflowCircRate（主力净流入占流通市值比，%）。
+
+    实测：
+        - 个股层面非零可用，可反推个股流通市值
+        - 板块层面全为 0，不可用
+    """
+    v = record.get("MainInflowCircRate")
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 # ============================================================
 # 便捷函数：从 fund_flow 结果提取关键字段
 # ============================================================
