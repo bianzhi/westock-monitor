@@ -3,7 +3,7 @@
 """FastAPI 后端：板块列表/单板块/分钟/强度排行/刷新板块。
 
 启动:
-  uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+  uvicorn app:app --host 0.0.0.0 --port 8200 --reload
   或
   python app.py
 
@@ -579,20 +579,43 @@ def _build_summary(
     days: int,
     circ_mv_yi: Optional[float],
 ) -> Optional[Dict[str, Any]]:
-    """构建近N日汇总：净流入之和 + 聚合净额率"""
+    """构建近N日汇总：净流入之和 + 聚合净额率
+
+    坑：westock 不给单日历史成交额，历史记录 turnover=None。
+    早期实现只累加"净流入 AND 成交额都有效"的记录，导致历史估算值被丢，
+    近3日/近5日都只算到今日1条 → 三窗数据完全相同。
+    修复成交额近似优先级：
+      1. 该日自身成交额（交易时段有效）
+      2. 今日成交额（开盘前为0也无效）
+      3. 流通市值 × 经验日均换手率 2%（兜底，非交易时段/历史日必走此项）
+    净流入累加必须包含所有有效历史估算值。
+    """
     if not records or days <= 0:
         return None
     subset = records[:days]
+    # 今日成交额：作为历史成交额缺失时的日均近似
+    today_turnover = subset[0].get("turnover") if subset else None
+    # 流通市值 × 2% 日均换手率兜底（circ_mv_yi 单位亿 → 元）
+    circ_mv_yuan = circ_mv_yi * 1e8 if circ_mv_yi else None
+    fallback_turnover = circ_mv_yuan * 0.02 if (circ_mv_yuan and circ_mv_yuan > 0) else None
     total_net = 0.0
     total_turnover = 0.0
     valid = 0
     for r in subset:
         net = r.get("net_flow")
+        if net is None:
+            continue
+        # 成交额缺失时用近似补齐：今日成交额 → 流通市值×2% 兜底
         turnover = r.get("turnover")
-        if net is not None and turnover is not None and turnover > 0:
-            total_net += net
-            total_turnover += turnover
-            valid += 1
+        if turnover is None or turnover <= 0:
+            turnover = today_turnover if (today_turnover and today_turnover > 0) else None
+        if (turnover is None or turnover <= 0) and fallback_turnover:
+            turnover = fallback_turnover
+        if turnover is None or turnover <= 0:
+            continue
+        total_net += net
+        total_turnover += turnover
+        valid += 1
     if valid == 0 or total_turnover <= 0:
         return {
             "days": days,

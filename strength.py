@@ -128,16 +128,26 @@ def calc_strength(net_rate_pct: float, circ_mv_yi: float) -> Dict[str, Any]:
 # ============================================================
 # 聚合净额率计算（近n日）
 # ============================================================
-def calc_aggregate_net_rate(daily_records: List[Dict], n: int) -> Optional[float]:
+def calc_aggregate_net_rate(daily_records: List[Dict], n: int, circ_mv_yi: Optional[float] = None) -> Optional[float]:
     """从日记录列表算近n日聚合净额率(%)。
 
     聚合口径：
         近n日净额率 = 近n日主力净流入之和 ÷ 近n日成交额之和 × 100
 
+    坑：westock 不给单日历史成交额，历史记录 turnover=None。
+    早期实现只累加"净流入 AND 成交额都有效"的记录，导致历史估算值被丢，
+    近n日都只算到今日1条 → 强度判定三窗完全相同。
+    修复成交额近似优先级：
+      1. 该日自身成交额（交易时段有效）
+      2. 今日成交额（开盘前为0也无效）
+      3. 流通市值 × 经验日均换手率 2%（兜底，非交易时段/历史日必走此项）
+    净流入累加必须包含所有有效历史估算值。
+
     Args:
         daily_records: 日记录列表，按时间倒序（今日在前），
                        每条含 net_flow(元), turnover(元)
         n: 窗口天数
+        circ_mv_yi: 流通市值(亿元)，用于成交额兜底近似
 
     Returns:
         聚合净额率百分比，无数据返回 None
@@ -147,6 +157,11 @@ def calc_aggregate_net_rate(daily_records: List[Dict], n: int) -> Optional[float
 
     # 取前n条（按时间倒序，今日=0, 昨日=1, ...）
     records = daily_records[:n]
+    # 今日成交额：作为历史成交额缺失时的日均近似
+    today_turnover = _to_float(records[0].get("turnover")) if records else None
+    # 流通市值 × 2% 日均换手率兜底（circ_mv_yi 单位亿 → 元）
+    circ_mv_yuan = circ_mv_yi * 1e8 if circ_mv_yi else None
+    fallback_turnover = circ_mv_yuan * 0.02 if (circ_mv_yuan and circ_mv_yuan > 0) else None
 
     total_net = 0.0
     total_turnover = 0.0
@@ -154,11 +169,19 @@ def calc_aggregate_net_rate(daily_records: List[Dict], n: int) -> Optional[float
 
     for r in records:
         net = _to_float(r.get("net_flow") or r.get("main_net_flow"))
+        if net is None:
+            continue
+        # 成交额缺失时用近似补齐：今日成交额 → 流通市值×2% 兜底
         turnover = _to_float(r.get("turnover"))
-        if net is not None and turnover is not None and turnover > 0:
-            total_net += net
-            total_turnover += turnover
-            valid_count += 1
+        if (turnover is None or turnover <= 0) and (today_turnover and today_turnover > 0):
+            turnover = today_turnover
+        if (turnover is None or turnover <= 0) and fallback_turnover:
+            turnover = fallback_turnover
+        if turnover is None or turnover <= 0:
+            continue
+        total_net += net
+        total_turnover += turnover
+        valid_count += 1
 
     if valid_count == 0 or total_turnover <= 0:
         return None
@@ -210,7 +233,7 @@ def calc_sector_strength(
         无数据时 value=0, level="普通"
     """
     scale = get_scale(circ_mv_yi)
-    net_rate_n = calc_aggregate_net_rate(daily_records, n)
+    net_rate_n = calc_aggregate_net_rate(daily_records, n, circ_mv_yi)
     net_flow_n = calc_aggregate_net_flow(daily_records, n)
 
     if net_rate_n is None:

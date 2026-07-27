@@ -77,8 +77,8 @@ fi
 MODE="${1:-all}"
 
 start_backend() {
-    echo "🚀 启动 FastAPI 后端 (端口 8000)..."
-    uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+    echo "🚀 启动 FastAPI 后端 (端口 8200)..."
+    uvicorn app:app --host 0.0.0.0 --port 8200 --reload
 }
 
 start_frontend() {
@@ -120,7 +120,7 @@ case "$MODE" in
 
         echo ""
         echo "✅ 全部服务已启动"
-        echo "   后端:    http://localhost:8000 (PID $BACKEND_PID)"
+        echo "   后端:    http://localhost:8200 (PID $BACKEND_PID)"
         echo "   前端:    http://localhost:5173 (PID $FRONTEND_PID)"
         echo "   采集器:  PID $COLLECTOR_PID"
         echo ""

@@ -97,8 +97,8 @@ westock-monitor/
 启动后访问：
 
 - **前端**：http://localhost:5173
-- **后端 API**：http://localhost:8000
-- **API 文档**：http://localhost:8000/docs
+- **后端 API**：http://localhost:8200
+- **API 文档**：http://localhost:8200/docs
 
 ### 手动启动
 
@@ -113,7 +113,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 # 启动 FastAPI
-uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app:app --host 0.0.0.0 --port 8200 --reload
 ```
 
 #### 2. 前端
@@ -187,7 +187,7 @@ n 可在界面右上角切换（3 / 5 / 10 / 20）。
 | `WESTOCK_BATCH_SIZE` | 20 | westock-data 批量查询每批数量 |
 | `WESTOCK_WORKERS` | 8 | westock-data 并发线程数 |
 | `TENCENT_WORKERS` | 8 | 腾讯HTTP接口并发数 |
-| `API_PORT` | 8000 | 后端端口 |
+| `API_PORT` | 8200 | 后端端口 |
 
 环境变量示例：
 
@@ -243,7 +243,7 @@ export MINUTE_INTERVAL=30
 | POST | `/api/refresh-sectors` | 手动刷新板块列表 |
 | POST | `/api/collect/minute` | 手动触发一次分钟采集 |
 
-完整接口文档：http://localhost:8000/docs
+完整接口文档：http://localhost:8200/docs
 
 ## 🧪 测试与自检
 

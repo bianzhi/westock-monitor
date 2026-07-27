@@ -257,9 +257,14 @@ def collect_all_sectors_circ_mv(
     all_pt_codes = list(stock_map.keys())
 
     # 2. 扁平化所有成分股，去重
+    # 坑：collect_constituents 返回 List[Dict]（每只 {code,name,SectorCode}），
+    # 但本函数期望 List[str] 股票代码。统一提取为字符串列表。
     all_stocks = set()
     for stocks in stock_map.values():
-        all_stocks.update(stocks)
+        for s in stocks:
+            wcode = s.get("code") if isinstance(s, dict) else s
+            if wcode:
+                all_stocks.add(wcode)
     logger.info("collect_all_sectors_circ_mv: %d unique stocks across %d sectors",
                 len(all_stocks), len(stock_map))
 
@@ -305,7 +310,11 @@ def collect_all_sectors_circ_mv(
 
         if use_tushare:
             source = "tushare"
-            for wcode in stock_codes:
+            for s in stock_codes:
+                wcode = s.get("code") if isinstance(s, dict) else s
+                if not wcode:
+                    skip_count += 1
+                    continue
                 tushare_code = _westock_to_tushare(wcode)
                 mv = mv_map.get(tushare_code)
                 if mv is not None and mv > 0:
@@ -315,7 +324,11 @@ def collect_all_sectors_circ_mv(
                     skip_count += 1
         else:
             source = "westock_reverse"
-            for wcode in stock_codes:
+            for s in stock_codes:
+                wcode = s.get("code") if isinstance(s, dict) else s
+                if not wcode:
+                    skip_count += 1
+                    continue
                 record = flow_index.get(wcode)
                 if record is None:
                     skip_count += 1
