@@ -39,7 +39,10 @@ export function MinuteChart({ points = [] }) {
           name: "本分钟增量(亿)",
           type: "bar",
           yAxisIndex: 0,
-          itemStyle: { color: "#3498db" },
+          itemStyle: {
+            color: (params) =>
+              params.value >= 0 ? "#e74c3c" : "#2ecc71",
+          },
           data: minDelta,
         },
         {
@@ -59,18 +62,35 @@ export function MinuteChart({ points = [] }) {
 
 /**
  * 近 n 日净流入柱状图
- * props: history = [{date, net_flow_yi, turnover_yi, net_rate}, ...]
+ * props: history = [{date, net_flow_yi, turnover_yi, net_rate, estimated}, ...]
  */
 export function DailyHistoryChart({ history = [] }) {
   const option = useMemo(() => {
-    const xs = history.map((h) => h.date || "");
-    const net = history.map((h) => h.net_flow_yi ?? null);
-    const turnover = history.map((h) => h.turnover_yi ?? null);
+    // 反转数组：API 返回今日在前（倒序），图表应旧→新（左→右），今日在右端
+    const reversed = [...history].reverse();
+    const xs = reversed.map((h) => h.date || "");
+    const net = reversed.map((h) => h.net_flow_yi ?? null);
+    const turnover = reversed.map((h) => h.turnover_yi ?? null);
+    const estimated = reversed.map((h) => h.estimated || false);
     return {
-      title: { text: "近 n 日净流入 / 成交额", left: "center", textStyle: { fontSize: 14 } },
-      tooltip: { trigger: "axis" },
-      legend: { data: ["净流入(亿)", "成交额(亿)"], top: 28 },
-      grid: { left: 50, right: 30, top: 80, bottom: 40 },
+      title: {
+        text: "近 n 日净流入 / 成交额",
+        subtext: "虚线 = 估算值（非真单日数据）",
+        left: "center",
+        textStyle: { fontSize: 14 },
+        subtextStyle: { fontSize: 11, color: "#999" },
+      },
+      tooltip: {
+        trigger: "axis",
+        formatter: (params) => {
+          const p1 = params[0];
+          const est = estimated[p1?.dataIndex];
+          return `${p1?.axisValue}${est ? " (估算)" : ""}<br/>
+            净流入: ${p1?.value?.toFixed(3) ?? "-"} 亿`;
+        },
+      },
+      legend: { data: ["净流入(亿)", "成交额(亿)"], top: 48 },
+      grid: { left: 50, right: 30, top: 90, bottom: 40 },
       xAxis: { type: "category", data: xs },
       yAxis: { type: "value", name: "亿元" },
       series: [
@@ -79,6 +99,12 @@ export function DailyHistoryChart({ history = [] }) {
           type: "bar",
           itemStyle: {
             color: (params) => (params.value >= 0 ? "#e74c3c" : "#2ecc71"),
+            borderColor: (params) =>
+              estimated[params.dataIndex] ? "#333" : "transparent",
+            borderWidth: (params) =>
+              estimated[params.dataIndex] ? 1 : 0,
+            borderType: (params) =>
+              estimated[params.dataIndex] ? "dashed" : "solid",
           },
           data: net,
         },

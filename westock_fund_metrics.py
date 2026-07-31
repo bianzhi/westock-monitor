@@ -41,7 +41,7 @@ fund flow 返回字段（实测）：
 import logging
 from typing import Any, Dict, List, Optional, Union
 
-from config import get_scale, SCALE_THRESHOLDS
+from config import get_scale, SCALE_THRESHOLDS, TURNOVER_METHOD
 
 logger = logging.getLogger(__name__)
 
@@ -95,17 +95,21 @@ def extract_retail_outflow(record: Dict) -> Optional[float]:
 # ============================================================
 def calc_turnover(
     record: Dict,
-    method: str = "main",
+    method: Optional[str] = None,
 ) -> Optional[float]:
     """计算板块成交额(元)。
 
     Args:
         record: fund flow 单条记录
-        method: "main" 主力口径 / "all" 全口径 / "auto" 优先main
+        method: "main" 主力口径 / "all" 全口径 / "auto" 优先main。
+                None 时使用 config.TURNOVER_METHOD（默认 "all"）
 
     Returns:
         成交额(元)，失败返回 None
     """
+    if method is None:
+        method = TURNOVER_METHOD
+
     inf = extract_main_inflow(record)
     outf = extract_main_outflow(record)
     ret_inf = extract_retail_inflow(record)
@@ -135,7 +139,7 @@ def calc_turnover(
 
 def calc_net_rate(
     record: Dict,
-    method: str = "main",
+    method: Optional[str] = None,
 ) -> Optional[float]:
     """计算净额率(%) = MainNetFlow / turnover × 100。
 
@@ -158,7 +162,7 @@ def calc_net_rate(
 # ============================================================
 def calc_sector_metrics(
     record: Dict,
-    turnover_method: str = "main",
+    turnover_method: Optional[str] = None,
 ) -> Dict[str, Any]:
     """从单条 fund flow 记录算出完整指标集。
 
@@ -198,7 +202,7 @@ def calc_sector_metrics(
 
 def calc_sector_metrics_batch(
     records: List[Dict],
-    turnover_method: str = "main",
+    turnover_method: Optional[str] = None,
 ) -> List[Dict]:
     """批量计算板块指标。"""
     return [

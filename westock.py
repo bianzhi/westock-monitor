@@ -78,6 +78,7 @@ def fund_flow(codes: Union[str, List[str]], raw: bool = True) -> List[Dict]:
     """批量查板块资金流（主力净流入 MainNetFlow 等）。
 
     自动按 WESTOCK_BATCH_SIZE 分批，WESTOCK_WORKERS 并发执行。
+    对首轮缺失的板块自动逐批重试，确保全覆盖。
 
     Args:
         codes: 单个代码字符串，或代码列表
@@ -91,12 +92,7 @@ def fund_flow(codes: Union[str, List[str]], raw: bool = True) -> List[Dict]:
     if not codes:
         return []
 
-    # 分批
-    batches = [
-        codes[i:i + WESTOCK_BATCH_SIZE]
-        for i in range(0, len(codes), WESTOCK_BATCH_SIZE)
-    ]
-    results: List[Dict] = []
+    all_codes = set(codes)
 
     def _fetch_batch(batch: List[str]) -> List[Dict]:
         codes_str = ",".join(batch)
@@ -107,15 +103,86 @@ def fund_flow(codes: Union[str, List[str]], raw: bool = True) -> List[Dict]:
             return data["data"]
         return []
 
+    def _extract_code(r: Dict) -> Optional[str]:
+        return r.get("code") or r.get("SecuCode")
+
+    # ---- 第一轮：并发分批 ----
+    batches = [
+        codes[i:i + WESTOCK_BATCH_SIZE]
+        for i in range(0, len(codes), WESTOCK_BATCH_SIZE)
+    ]
+    results: List[Dict] = []
+    got_codes: Set[str] = set()
+
     with ThreadPoolExecutor(max_workers=WESTOCK_WORKERS) as pool:
         futures = [pool.submit(_fetch_batch, b) for b in batches]
         for f in as_completed(futures):
             try:
-                results.extend(f.result())
+                batch_results = f.result()
+                for r in batch_results:
+                    c = _extract_code(r)
+                    if c:
+                        got_codes.add(c)
+                results.extend(batch_results)
             except Exception as e:
                 logger.warning("fund_flow batch error: %s", e)
 
-    logger.info("fund_flow: requested %d codes, got %d records", len(codes), len(results))
+    # ---- 第二轮：补齐缺失板块（逐批重试，最多 2 轮） ----
+    missing = all_codes - got_codes
+    retry_rounds = 0
+    max_retry_rounds = 2
+
+    while missing and retry_rounds < max_retry_rounds:
+        retry_rounds += 1
+        retry_list = sorted(missing)
+        logger.info("fund_flow: round %d, %d codes missing, retrying...",
+                    retry_rounds, len(retry_list))
+
+        # 用更小的批次重试（每批 5 个，减少 CLI 侧丢数据的可能）
+        retry_batches = [
+            retry_list[i:i + 5]
+            for i in range(0, len(retry_list), 5)
+        ]
+
+        with ThreadPoolExecutor(max_workers=WESTOCK_WORKERS) as pool:
+            futures = [pool.submit(_fetch_batch, b) for b in retry_batches]
+            for f in as_completed(futures):
+                try:
+                    batch_results = f.result()
+                    for r in batch_results:
+                        c = _extract_code(r)
+                        if c and c in missing:
+                            missing.discard(c)
+                            got_codes.add(c)
+                    results.extend(batch_results)
+                except Exception as e:
+                    logger.warning("fund_flow retry error: %s", e)
+
+    if missing:
+        logger.warning("fund_flow: %d codes still missing after %d retry rounds: %s",
+                       len(missing), max_retry_rounds, sorted(missing)[:10])
+
+        # ---- 第三轮：逐个兜底查询 ----
+        logger.info("fund_flow: final round, trying %d codes individually", len(missing))
+        for code in sorted(missing):
+            try:
+                r = _fetch_batch([code])
+                if r:
+                    for item in r:
+                        c = _extract_code(item)
+                        if c:
+                            missing.discard(c)
+                            got_codes.add(c)
+                    results.extend(r)
+            except Exception as e:
+                logger.debug("fund_flow individual retry %s: %s", code, e)
+
+    if missing:
+        logger.warning("fund_flow: %d codes still missing after all retries: %s",
+                       len(missing), sorted(missing)[:10])
+
+    logger.info("fund_flow: requested %d codes, got %d records (%d missing)",
+                len(all_codes), len(results), len(missing))
     return results
 
 

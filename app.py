@@ -35,7 +35,7 @@ from pydantic import BaseModel
 from config import (
     API_HOST, API_PORT, CORS_ORIGINS,
     STRENGTH_WINDOW_N, DISPLAY_DAYS, SUMMARY_3D, SUMMARY_5D,
-    SCALE_THRESHOLDS, get_scale,
+    SCALE_THRESHOLDS, get_scale, SCALE_TURNOVER_RATE,
 )
 from sectors import DEFAULT_SECTORS, get_default_sector_map
 from storage import get_storage
@@ -50,6 +50,18 @@ from strength import (
     calc_sector_strength, level_to_color,
 )
 from westock_fund_metrics import calc_sector_metrics_batch, calc_turnover
+from data_cache import (
+    init_cache, is_ready, refresh_cache, get_max_n,
+    get_codes as cache_get_codes, get_sectors as cache_get_sectors,
+    get_daily_map, get_circ_mv_map, get_circ_mv, start_background_refresh,
+)
+
+# ============================================================
+# 请求缓存：避免同秒内重复调 CLI 雪崩
+# ============================================================
+_sectors_cache: Dict[str, Any] = {}
+_cache_lock = threading.Lock()
+CACHE_TTL_SEC = 15  # 15s 内重复请求直接返回缓存
 
 # ============================================================
 # 日志配置
@@ -126,6 +138,28 @@ class StrengthRankingResponse(BaseModel):
     top_strong: List[Dict[str, Any]]        # 强/偏强 Top
     top_weak: List[Dict[str, Any]]          # 偏弱/弱 Top
     level_distribution: Dict[str, int]      # 各档数量
+
+
+class L1SummaryRow(BaseModel):
+    l1_name: str
+    sector_count: int
+    total_circ_mv_yi: Optional[float] = None   # 总流通市值(亿)
+    total_net_flow_yi: Optional[float] = None  # 总今日净流入(亿)
+    total_turnover_yi: Optional[float] = None  # 总今日成交额(亿)
+    net_rate: Optional[float] = None           # 聚合净额率(%)
+    avg_strength_value: float = 0.0            # 平均强度值
+    strength_distribution: Dict[str, int] = {} # 各档数量
+    strong_count: int = 0
+    weak_count: int = 0
+    top_sectors: List[Dict[str, Any]] = []     # 强度最高 3 个二级板块
+
+
+class L1SummaryResponse(BaseModel):
+    date: str
+    last_update: str
+    n_window: int
+    l1_summaries: List[L1SummaryRow]
+    total_l1: int
 
 
 # ============================================================
@@ -238,35 +272,49 @@ async def get_config():
 @app.get("/api/sectors", response_model=SectorListResponse)
 async def get_sectors(
     n: int = Query(STRENGTH_WINDOW_N, description="强度判定窗口"),
-    use_cache: bool = Query(True, description="是否使用缓存的分钟数据"),
+    force_refresh: bool = Query(False, description="是否强制刷新缓存"),
 ):
     """板块列表 + 当前强度（宽表主数据）。
 
-    数据流：
-      1. 实时调 westock fund flow + 腾讯HTTP，拿今日净流入/成交额/流通市值
-      2. 实时调 westock MainNetFlow5D/10D/20D，反推近n日历史
-      3. 计算 近3日/近5日 净额率
-      4. 计算 5档强度判定
+    数据来源：启动时预加载的 data_cache（10 交易日），<5ms 响应。
+    force_refresh=True 时重新拉取最新数据。
 
     Args:
-        n: 强度判定窗口天数
-        use_cache: 是否使用 storage 缓存
+        n: 强度判定窗口天数（须 ≤ 缓存窗口，否则用缓存窗口）
+        force_refresh: True 时跳过缓存，实时拉取
     """
+    # 强制刷新：重新拉取数据
+    if force_refresh:
+        logger.info("get_sectors: force_refresh triggered")
+        refresh_cache()
+        if not is_ready():
+            raise HTTPException(status_code=503, detail="cache refresh failed")
+
+    # 未就绪：尝试初始化
+    if not is_ready():
+        logger.warning("get_sectors: cache not ready, initializing...")
+        ok = init_cache(n=10)
+        if not ok:
+            raise HTTPException(status_code=503, detail="data cache not ready, try again")
+
     _ensure_meta()
     storage = get_storage()
-    codes = get_sector_codes()
-    if not codes:
-        raise HTTPException(status_code=500, detail="no sector codes configured")
 
-    # 1. 实时拉取全板块日级数据
-    daily_map, circ_mv_map = collect_all_sectors_daily(n=n)
-    _update_meta_with_realtime(daily_map, circ_mv_map)
-
-    # 2. 加载板块元数据
+    # 从缓存读取
+    sector_list = cache_get_sectors()
+    codes = cache_get_codes()
+    daily_map = get_daily_map()
+    circ_mv_map = get_circ_mv_map()
     meta_map = {m["code"]: m for m in storage.get_all_sector_meta()}
-    sector_list = load_sectors()
 
-    # 3. 组装宽表行
+    if not codes or not sector_list:
+        raise HTTPException(status_code=500, detail="no cached sector data")
+
+    # n 不能超过缓存窗口
+    max_n = get_max_n() or n
+    actual_n = min(n, max_n)
+
+    # 组装宽表行
     rows: List[SectorRow] = []
     today_str = date.today().isoformat()
 
@@ -279,26 +327,20 @@ async def get_sectors(
         today_rec = records[0] if records else {}
         today_net = today_rec.get("net_flow")
         today_turnover = today_rec.get("turnover")
-        today_circ_mv = today_rec.get("circ_mv")
 
-        # 流通市值：优先今日实时，其次缓存
-        circ_mv_yi = None
-        if today_circ_mv:
-            circ_mv_yi = _to_yi(today_circ_mv)
-        elif meta.get("circ_mv_yi"):
-            circ_mv_yi = meta["circ_mv_yi"]
-
+        # 流通市值：优先缓存，其次 meta
+        circ_mv_yi = circ_mv_map.get(code) or meta.get("circ_mv_yi")
         scale = get_scale(circ_mv_yi) if circ_mv_yi else (meta.get("scale") or "小盘")
 
-        # 历史明细 (近 DISPLAY_DAYS 日)
-        history = _build_history(records, today_circ_mv, n)
+        # 历史明细
+        history = _build_history(records, None, actual_n)
 
         # 近3日/近5日汇总
         summary_3d = _build_summary(records, SUMMARY_3D, circ_mv_yi)
         summary_5d = _build_summary(records, SUMMARY_5D, circ_mv_yi)
 
-        # 强度判定：基于近 n 日聚合净额率
-        strength = _calc_strength_from_records(records, circ_mv_yi, n)
+        # 强度判定
+        strength = _calc_strength_from_records(records, circ_mv_yi, actual_n)
 
         rows.append(SectorRow(
             code=code,
@@ -316,15 +358,101 @@ async def get_sectors(
             strength_level=strength["level"],
         ))
 
-    # 按强度值降序
     rows.sort(key=lambda r: r.strength_value, reverse=True)
 
     return SectorListResponse(
         date=today_str,
         last_update=datetime.now().isoformat(),
-        n_window=n,
+        n_window=actual_n,
         sectors=rows,
         total=len(rows),
+    )
+
+
+@app.get("/api/sectors/l1-summary", response_model=L1SummaryResponse)
+async def get_l1_summary(
+    n: int = Query(STRENGTH_WINDOW_N, description="强度判定窗口"),
+):
+    """一级行业聚合视图：31 个一级行业 × 汇总资金流 + 强度分布。
+
+    对 /api/sectors 的 134 个二级板块按 l1 字段分组，
+    汇总总净流入/总成交额/聚合净额率/各档分布/最强 3 个二级板块。
+    """
+    sectors_resp = await get_sectors(n=n)
+    rows = sectors_resp.sectors
+
+    # 按 l1 分组
+    from collections import OrderedDict
+    groups: Dict[str, List[SectorRow]] = OrderedDict()
+    for r in rows:
+        l1 = r.l1 or "其他"
+        groups.setdefault(l1, []).append(r)
+
+    summaries = []
+    for l1_name, group_rows in groups.items():
+        count = len(group_rows)
+
+        # 汇总金额（排除 None）
+        valid_turnover = [r for r in group_rows if r.today_turnover_yi is not None]
+        total_turnover = sum(r.today_turnover_yi for r in valid_turnover) if valid_turnover else None
+
+        valid_net = [r for r in group_rows if r.today_net_flow_yi is not None]
+        total_net = sum(r.today_net_flow_yi for r in valid_net) if valid_net else None
+
+        valid_mv = [r for r in group_rows if r.circ_mv_yi is not None]
+        total_mv = sum(r.circ_mv_yi for r in valid_mv) if valid_mv else None
+
+        # 聚合净额率
+        net_rate = None
+        if total_net is not None and total_turnover is not None and total_turnover > 0:
+            net_rate = round(total_net / total_turnover * 100, 4)
+
+        # 平均强度值
+        avg_strength = sum(r.strength_value for r in group_rows) / count if count > 0 else 0
+
+        # 强度分布
+        dist = {"强": 0, "偏强": 0, "普通": 0, "偏弱": 0, "弱": 0}
+        for r in group_rows:
+            lv = r.strength_level
+            if lv in dist:
+                dist[lv] += 1
+
+        # 最强 3 个二级板块
+        sorted_group = sorted(group_rows, key=lambda x: x.strength_value, reverse=True)
+        top3 = [
+            {
+                "code": s.code,
+                "name": s.name,
+                "net_rate": s.today_net_rate,
+                "strength_level": s.strength_level,
+                "strength_value": s.strength_value,
+            }
+            for s in sorted_group[:3]
+        ]
+
+        summaries.append(L1SummaryRow(
+            l1_name=l1_name,
+            sector_count=count,
+            total_circ_mv_yi=total_mv,
+            total_net_flow_yi=total_net,
+            total_turnover_yi=total_turnover,
+            net_rate=net_rate,
+            avg_strength_value=round(avg_strength, 3),
+            strength_distribution=dist,
+            strong_count=dist.get("强", 0),
+            weak_count=dist.get("弱", 0),
+            top_sectors=top3,
+        ))
+
+    # 按平均强度降序
+    summaries.sort(key=lambda s: s.avg_strength_value, reverse=True)
+
+    return L1SummaryResponse(
+        date=sectors_resp.date,
+        last_update=sectors_resp.last_update,
+        n_window=n,
+        l1_summaries=summaries,
+        total_l1=len(summaries),
     )
 
 
@@ -595,9 +723,11 @@ def _build_summary(
     subset = records[:days]
     # 今日成交额：作为历史成交额缺失时的日均近似
     today_turnover = subset[0].get("turnover") if subset else None
-    # 流通市值 × 2% 日均换手率兜底（circ_mv_yi 单位亿 → 元）
+    # 流通市值 × 规模分档换手率（circ_mv_yi 单位亿 → 元）
+    scale = get_scale(circ_mv_yi) if circ_mv_yi else "小盘"
+    rate = SCALE_TURNOVER_RATE.get(scale, 0.02)
     circ_mv_yuan = circ_mv_yi * 1e8 if circ_mv_yi else None
-    fallback_turnover = circ_mv_yuan * 0.02 if (circ_mv_yuan and circ_mv_yuan > 0) else None
+    fallback_turnover = circ_mv_yuan * rate if (circ_mv_yuan and circ_mv_yuan > 0) else None
     total_net = 0.0
     total_turnover = 0.0
     valid = 0
@@ -653,12 +783,36 @@ def _calc_strength_from_records(
 # ============================================================
 @app.on_event("startup")
 async def startup_event():
-    """应用启动时初始化"""
+    """应用启动时初始化：后台预热 + 后台加载缓存"""
     logger.info("=== app startup ===")
     _ensure_meta()
     storage = get_storage()
     stats = storage.get_stats()
     logger.info("storage stats: %s", stats)
+
+    # 后台线程：预热 + 缓存加载（不阻塞启动）
+    def _bg_init():
+        """后台初始化：预热 CLI → 加载缓存 → 启动定时刷新"""
+        import time as _time
+        try:
+            from westock import fund_flow
+            fund_flow(["pt01801081"], raw=True)
+            logger.info("westock CLI warmup done (background)")
+        except Exception as e:
+            logger.warning("westock CLI warmup failed: %s", e)
+
+        try:
+            ok = init_cache(n=10)
+            if ok:
+                logger.info("data_cache: preloaded, %d codes ready", len(cache_get_codes()))
+                start_background_refresh(interval_sec=60)
+            else:
+                logger.error("data_cache: preload FAILED")
+        except Exception as e:
+            logger.error("data_cache: preload error: %s", e, exc_info=True)
+
+    threading.Thread(target=_bg_init, daemon=True, name="startup_init").start()
+    logger.info("app startup complete (cache loading in background)")
 
 
 def main():

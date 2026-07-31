@@ -38,7 +38,7 @@ import logging
 from typing import List, Dict, Optional, Any
 
 from config import (
-    SCALE_THRESHOLDS, STRENGTH_LEVELS, get_scale,
+    SCALE_THRESHOLDS, STRENGTH_LEVELS, get_scale, SCALE_TURNOVER_RATE,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,13 +134,10 @@ def calc_aggregate_net_rate(daily_records: List[Dict], n: int, circ_mv_yi: Optio
     聚合口径：
         近n日净额率 = 近n日主力净流入之和 ÷ 近n日成交额之和 × 100
 
-    坑：westock 不给单日历史成交额，历史记录 turnover=None。
-    早期实现只累加"净流入 AND 成交额都有效"的记录，导致历史估算值被丢，
-    近n日都只算到今日1条 → 强度判定三窗完全相同。
-    修复成交额近似优先级：
+    成交额近似优先级：
       1. 该日自身成交额（交易时段有效）
       2. 今日成交额（开盘前为0也无效）
-      3. 流通市值 × 经验日均换手率 2%（兜底，非交易时段/历史日必走此项）
+      3. 流通市值 × 按规模分档的日均换手率（兜底：大盘1%/中盘2%/小盘3%）
     净流入累加必须包含所有有效历史估算值。
 
     Args:
@@ -159,9 +156,11 @@ def calc_aggregate_net_rate(daily_records: List[Dict], n: int, circ_mv_yi: Optio
     records = daily_records[:n]
     # 今日成交额：作为历史成交额缺失时的日均近似
     today_turnover = _to_float(records[0].get("turnover")) if records else None
-    # 流通市值 × 2% 日均换手率兜底（circ_mv_yi 单位亿 → 元）
+    # 流通市值 × 规模分档换手率（circ_mv_yi 单位亿 → 元）
+    scale = get_scale(circ_mv_yi) if circ_mv_yi else "小盘"
+    rate = SCALE_TURNOVER_RATE.get(scale, 0.02)
     circ_mv_yuan = circ_mv_yi * 1e8 if circ_mv_yi else None
-    fallback_turnover = circ_mv_yuan * 0.02 if (circ_mv_yuan and circ_mv_yuan > 0) else None
+    fallback_turnover = circ_mv_yuan * rate if (circ_mv_yuan and circ_mv_yuan > 0) else None
 
     total_net = 0.0
     total_turnover = 0.0

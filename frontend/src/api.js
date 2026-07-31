@@ -35,4 +35,7 @@ export const refreshSectors = () =>
 export const triggerMinuteCollect = () =>
   api.post("/collect/minute").then((r) => r.data);
 
+export const fetchL1Summary = (n) =>
+  api.get("/sectors/l1-summary", { params: { n } }).then((r) => r.data);
+
 export default api;

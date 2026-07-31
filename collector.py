@@ -40,11 +40,15 @@ import time
 from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from trading_calendar import (
+    get_last_n_trading_days, get_trading_day_offset, is_trading_day,
+)
+
 from config import (
     BASE_DIR, DATA_DIR, SECTORS_CACHE, MINUTE_INTERVAL, IDLE_SLEEP,
     TRADING_MORNING, TRADING_AFTERNOON, STRENGTH_WINDOW_N, DISPLAY_DAYS,
     SUMMARY_3D, SUMMARY_5D, MINUTE_CACHE_DAYS, get_scale,
-    CIRC_MV_COLLECT_TIMES, CIRC_MV_CHECK_INTERVAL,
+    CIRC_MV_COLLECT_TIMES, CIRC_MV_CHECK_INTERVAL, TURNOVER_METHOD,
 )
 from sectors import DEFAULT_SECTORS, get_default_codes, get_default_sector_map
 from westock import (
@@ -229,7 +233,7 @@ def collect_minute_snapshot() -> Dict[str, Any]:
     for r in flow_records:
         code = r.get("code") or r.get("SecuCode")
         if code:
-            metrics_map[code] = calc_sector_metrics(r, "main")
+            metrics_map[code] = calc_sector_metrics(r, TURNOVER_METHOD)
 
     # 3. 组装快照 + 差分
     snapshot_list: List[Dict] = []
@@ -293,19 +297,20 @@ def collect_minute_snapshot() -> Dict[str, Any]:
 def collect_daily_records(code: str, n: int = 5) -> List[Dict]:
     """实时拉取单板块近n日日级记录。
 
-    策略（你定的"优先接口获取，获取不到的计算"）：
-      1. 今日数据：调 westock fund flow + 腾讯 HTTP，拿今日净流入/成交额/流通市值
-      2. 近n日累计：调 westock MainNetFlow5D/10D/20D（接口能给的）
-      3. 单日历史 T-1/T-2/...：westock 不直接给单日历史，
-         用近5日累计 - 近4日累计 反推（但 westock 只给5/10/20档，没4日）
-         → 此处改用腾讯HTTP接口的成交额 + westock 累计差分
-      4. 简化实现：今日实时，历史用 MainNetFlow5D/10D 平均估算
+    数据来源：
+      1. 今日数据：调 westock fund flow
+      2. 历史 T-1..T-(n-1)：westock 不给单日历史，用累计字段分段差分估算。
+
+    分段差分策略（阶梯估算，避免全平）：
+      - T-1~T-4：    (MainNetFlow5D  - 今日) / 4         → "近5日段"
+      - T-5~T-9：    (MainNetFlow10D - MainNetFlow5D) / 5  → "近10日段"
+      - T-10~T-19：  (MainNetFlow20D - MainNetFlow10D) / 10 → "近20日段"
+      - 超出 20D 范围：回退到上一段均值
+      日期使用交易日历（跳过周末/节假日），标记 estimated=True。
 
     实测 westock fund flow 返回字段：
       MainNetFlow (今日累计净流入, 元)
-      MainNetFlow5D (近5日累计净流入, 元)
-      MainNetFlow10D (近10日累计净流入, 元)
-      MainNetFlow20D (近20日累计净流入, 元)
+      MainNetFlow5D / 10D / 20D (近N日累计净流入, 元)
 
     Args:
         code: 板块代码
@@ -313,7 +318,8 @@ def collect_daily_records(code: str, n: int = 5) -> List[Dict]:
 
     Returns:
         日记录列表，按时间倒序（今日在前），每条含:
-          date, net_flow(元), turnover(元), main_net_flow_5d, main_net_flow_10d
+          date, trade_date, net_flow(元), turnover(元),
+          main_net_flow_5d/10d/20d, estimated
     """
     records: List[Dict] = []
     today = date.today()
@@ -321,7 +327,7 @@ def collect_daily_records(code: str, n: int = 5) -> List[Dict]:
     # 1. 今日实时：westock fund flow
     flow_records = fund_flow([code], raw=True)
     flow = flow_records[0] if flow_records else {}
-    metrics = calc_sector_metrics(flow, "main") if flow else {}
+    metrics = calc_sector_metrics(flow, TURNOVER_METHOD) if flow else {}
 
     today_net = extract_main_net_flow(flow)
     today_turnover = metrics.get("turnover")
@@ -333,31 +339,47 @@ def collect_daily_records(code: str, n: int = 5) -> List[Dict]:
     records.append({
         "date": today.isoformat(),
         "trade_date": today.strftime("%Y%m%d"),
-        "net_flow": today_net,                  # 今日主力净流入 (元)
-        "turnover": today_turnover,             # 今日成交额 (元，自算)
-        "circ_mv": today_circ_mv,               # 流通市值 (暂缺)
-        "main_net_flow_5d": net_5d,             # 近5日累计 (元)
-        "main_net_flow_10d": net_10d,           # 近10日累计 (元)
-        "main_net_flow_20d": net_20d,           # 近20日累计 (元)
+        "net_flow": today_net,
+        "turnover": today_turnover,
+        "circ_mv": today_circ_mv,
+        "main_net_flow_5d": net_5d,
+        "main_net_flow_10d": net_10d,
+        "main_net_flow_20d": net_20d,
     })
 
-    # 2. 历史 T-1..T-(n-1) 日：westock 不给单日历史，用累计差分
-    #    MainNetFlow5D = T-4..T 的累计，所以 T-1 单日 = 5D - (T-2..T-4)？
-    #    实际 westock 只给 5D/10D/20D，没法逐日拆。
-    #    方案：用累计值倒推平均，标记 estimated=True
+    # 2. 历史 T-1..T-(n-1)：分段差分估算
+    #    使用交易日历获取真实历史日期
     if n > 1 and net_5d is not None and today_net is not None:
-        # 近4日累计 = 5D - 今日
-        net_4d = net_5d - today_net
-        # 平均到 T-1..T-4
-        avg_daily = net_4d / (n - 1) if (n - 1) > 0 else 0
-        for i in range(1, n):
-            d = today - timedelta(days=i)
+        # 各段日均净流入（分段阶梯）
+        seg_1_4 = (net_5d - today_net) / 4.0 if net_5d is not None and today_net is not None else None  # T-1~T-4
+        seg_5_9 = ((net_10d - net_5d) / 5.0) if (net_10d is not None and net_5d is not None) else None    # T-5~T-9
+        seg_10_19 = ((net_20d - net_10d) / 10.0) if (net_20d is not None and net_10d is not None) else None  # T-10~T-19
+
+        # 获取最近 n 个交易日（不含今日，含今日则多取 1 个）
+        trading_days = get_last_n_trading_days(n + 1, today)
+        # 跳过今日 (trading_days[0])
+        history_days = trading_days[1:n + 1]  # T-1..T-(n-1)
+
+        for idx, d in enumerate(history_days):
+            i = idx + 1  # i=1 表示 T-1, i=2 表示 T-2...
+
+            # 分区选择日均
+            if seg_1_4 is not None and i <= 4:
+                avg = seg_1_4
+            elif seg_5_9 is not None and i <= 9:
+                avg = seg_5_9
+            elif seg_10_19 is not None and i <= 19:
+                avg = seg_10_19
+            else:
+                # 超出 20D 范围，用最后一段兜底，没有则用 seg_1_4
+                avg = seg_10_19 or seg_5_9 or seg_1_4 or 0
+
             records.append({
                 "date": d.isoformat(),
                 "trade_date": d.strftime("%Y%m%d"),
-                "net_flow": round(avg_daily, 2),  # 估算
-                "turnover": None,                 # 历史成交额未知
-                "circ_mv": today_circ_mv,         # 用今日流通市值近似
+                "net_flow": round(avg, 2),
+                "turnover": None,
+                "circ_mv": today_circ_mv,
                 "main_net_flow_5d": net_5d,
                 "main_net_flow_10d": net_10d,
                 "main_net_flow_20d": net_20d,
@@ -394,11 +416,15 @@ def collect_all_sectors_daily(n: int = 5) -> Tuple[Dict[str, List[Dict]], Dict[s
         code = r.get("code") or r.get("SecuCode")
         if code:
             flow_map[code] = r
-            metrics_map[code] = calc_sector_metrics(r, "main")
+            metrics_map[code] = calc_sector_metrics(r, TURNOVER_METHOD)
 
     today = date.today()
     daily_map: Dict[str, List[Dict]] = {}
     circ_mv_map: Dict[str, float] = {}  # fund flow 不提供流通市值，暂空
+
+    # 预计算交易日列表（所有板块共用）
+    trading_days = get_last_n_trading_days(n + 1, today) if n > 1 else []
+    history_days_all = trading_days[1:n + 1] if len(trading_days) > 1 else []
 
     for code in codes:
         flow = flow_map.get(code, {})
@@ -423,16 +449,27 @@ def collect_all_sectors_daily(n: int = 5) -> Tuple[Dict[str, List[Dict]], Dict[s
             "main_net_flow_20d": net_20d,
         })
 
-        # 历史 T-1..T-(n-1)：用累计差分估算
+        # 历史 T-1..T-(n-1)：分段差分估算（使用交易日历）
         if n > 1 and net_5d is not None and today_net is not None:
-            net_4d = net_5d - today_net
-            avg_daily = net_4d / (n - 1) if (n - 1) > 0 else 0
-            for i in range(1, n):
-                d = today - timedelta(days=i)
+            seg_1_4 = (net_5d - today_net) / 4.0 if net_5d is not None and today_net is not None else None
+            seg_5_9 = ((net_10d - net_5d) / 5.0) if (net_10d is not None and net_5d is not None) else None
+            seg_10_19 = ((net_20d - net_10d) / 10.0) if (net_20d is not None and net_10d is not None) else None
+
+            for idx, d in enumerate(history_days_all):
+                i = idx + 1
+                if seg_1_4 is not None and i <= 4:
+                    avg = seg_1_4
+                elif seg_5_9 is not None and i <= 9:
+                    avg = seg_5_9
+                elif seg_10_19 is not None and i <= 19:
+                    avg = seg_10_19
+                else:
+                    avg = seg_10_19 or seg_5_9 or seg_1_4 or 0
+
                 records.append({
                     "date": d.isoformat(),
                     "trade_date": d.strftime("%Y%m%d"),
-                    "net_flow": round(avg_daily, 2),
+                    "net_flow": round(avg, 2),
                     "turnover": None,
                     "circ_mv": today_circ_mv,
                     "main_net_flow_5d": net_5d,
