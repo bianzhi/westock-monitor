@@ -42,18 +42,46 @@ if $KILL_ONLY; then
 fi
 
 # ----------------------------------------------------------
-# 2. 检查依赖
+# 2. 检查并自动安装依赖
 # ----------------------------------------------------------
 echo ""
 echo "🔍 检查环境..."
 
+# 自动安装函数：依次尝试 yum / dnf / apt / brew
+_auto_install() {
+    local pkg="$1"
+    for mgr in dnf yum apt brew; do
+        if command -v "$mgr" &> /dev/null; then
+            echo "   正在用 $mgr 安装 $pkg ..."
+            $mgr install -y "$pkg" > /dev/null 2>&1 && return 0
+        fi
+    done
+    return 1
+}
+
 if ! command -v node &> /dev/null; then
-    echo "❌ 未检测到 Node.js，请先安装"
-    exit 1
+    echo "⚠️  未检测到 Node.js，尝试自动安装..."
+    # Node.js 包名在不同发行版可能不同：nodejs / node
+    if _auto_install "nodejs"; then
+        echo "   ✅ Node.js 安装完成"
+    elif _auto_install "node"; then
+        echo "   ✅ Node.js 安装完成"
+    else
+        echo "   ❌ 自动安装失败，请手动安装 Node.js ≥ 18"
+        echo "   CentOS/RHEL: curl -fsSL https://rpm.nodesource.com/setup_18.x | bash - && yum install -y nodejs"
+        echo "   Ubuntu/Debian: curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && apt install -y nodejs"
+        exit 1
+    fi
 fi
+
 if ! command -v python3 &> /dev/null; then
-    echo "❌ 未检测到 python3"
-    exit 1
+    echo "⚠️  未检测到 python3，尝试自动安装..."
+    if _auto_install "python3"; then
+        echo "   ✅ Python3 安装完成"
+    else
+        echo "   ❌ 自动安装失败，请手动安装 Python ≥ 3.8"
+        exit 1
+    fi
 fi
 
 # 虚拟环境
