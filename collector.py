@@ -41,7 +41,7 @@ from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from trading_calendar import (
-    get_last_n_trading_days, get_trading_day_offset, is_trading_day,
+    get_last_n_trading_days, get_previous_trading_day, is_trading_day,
 )
 
 from config import (
@@ -348,17 +348,29 @@ def collect_daily_records(code: str, n: int = 5) -> List[Dict]:
     })
 
     # 2. 历史 T-1..T-(n-1)：分段差分估算
-    #    使用交易日历获取真实历史日期
+    #    使用交易日历获取真实历史日期。
+    #    边界处理：today 非交易日时（周末/节假日盘中查询），
+    #    fund flow 的 MainNetFlow/5D/10D/20D 实测仍是"含最近交易日"的累计值
+    #    （westock CLI 在非交易日返回的是上一个交易日收盘值），
+    #    因此历史估算仍应锚定"上一个交易日为 T-1"，而非把 today 当 T-0。
     if n > 1 and net_5d is not None and today_net is not None:
         # 各段日均净流入（分段阶梯）
         seg_1_4 = (net_5d - today_net) / 4.0 if net_5d is not None and today_net is not None else None  # T-1~T-4
         seg_5_9 = ((net_10d - net_5d) / 5.0) if (net_10d is not None and net_5d is not None) else None    # T-5~T-9
         seg_10_19 = ((net_20d - net_10d) / 10.0) if (net_20d is not None and net_10d is not None) else None  # T-10~T-19
 
-        # 获取最近 n 个交易日（不含今日，含今日则多取 1 个）
-        trading_days = get_last_n_trading_days(n + 1, today)
-        # 跳过今日 (trading_days[0])
-        history_days = trading_days[1:n + 1]  # T-1..T-(n-1)
+        # 锚定"今日对应的最近交易日"为 T-0，往前取 n-1 个历史交易日 T-1..T-(n-1)
+        # 避免用 get_last_n_trading_days(n+1, today)+切片 的歧义写法：
+        #   today 非交易日时，get_last_n_trading_days 的第 0 个元素是上一个交易日，
+        #   [1:n+1] 切片会把"上上一个交易日"当 T-1，丢失了真正的 T-1。
+        anchor = today if is_trading_day(today) else get_previous_trading_day(today)
+        if anchor is None:
+            history_days: List[date] = []
+        else:
+            # get_last_n_trading_days 返回 [anchor, T-1, T-2, ...] 倒序
+            trading_days = get_last_n_trading_days(n, anchor)
+            # 跳过 anchor（trading_days[0]），取 T-1..T-(n-1)
+            history_days = trading_days[1:n]
 
         for idx, d in enumerate(history_days):
             i = idx + 1  # i=1 表示 T-1, i=2 表示 T-2...

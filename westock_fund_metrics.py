@@ -212,6 +212,73 @@ def calc_sector_metrics_batch(
     ]
 
 
+# ============================================================
+# 累计字段口径验证（5D/10D/20D）
+# ============================================================
+# 实测结论（2026-07-31，westock-data-skillhub@1.0.5，板块 pt01801081 半导体）：
+#   日期          today        5D          10D          20D
+#   2026-07-31   +109.81亿   -526.86亿   -863.32亿   -2300.54亿
+#   2026-07-17   -241.51亿   -1347.16亿  -1437.21亿  -2409.56亿
+# 推理：
+#   7-31 的 20D − 7-31 的 10D = -1437.22亿 ≈ 7-17 的 10D（-1437.21亿） ✓
+#   说明 20D = 含今日的最近 20 个交易日累计；10D = 含今日的最近 10 个交易日累计
+#   同理 5D = 含今日的最近 5 个交易日累计
+# 因此 collect_daily_records 的分段差分分母 4/5/10 是正确的：
+#   seg_1_4   = (5D  - today) / 4      ← 前 4 个交易日累计
+#   seg_5_9   = (10D - 5D)    / 5      ← 前 5~9 个交易日累计
+#   seg_10_19 = (20D - 10D)   / 10     ← 前 10~19 个交易日累计
+# ============================================================
+def verify_net_flow_window_consistency(record: Dict, tolerance: float = 0.02) -> Dict[str, Any]:
+    """验证单条 fund flow 记录中 5D/10D/20D 累计字段的口径一致性。
+
+    口径假设（实测成立）：
+        5D  = 含今日的最近 5 个交易日累计
+        10D = 含今日的最近 10 个交易日累计 → 必须有 10D - 5D ≈ (5D - today) 的同量级
+        20D = 含今日的最近 20 个交易日累计 → 必须有 20D - 10D ≈ 10D - 5D 的同量级
+    本函数只检查"嵌套包含关系"：今日值应被 5D 包含，5D 应被 10D 包含，10D 应被 20D 包含。
+    若嵌套关系不成立，说明字段口径变化（westock 升级等），collect_daily_records 的分段差分会出错。
+
+    Args:
+        record: fund flow 单条记录，需含 MainNetFlow / MainNetFlow5D / 10D / 20D
+        tolerance: 允许的相对误差（默认 2%，因累计值含浮点抖动）
+
+    Returns:
+        {
+          "ok": bool,                   # 口径是否一致
+          "today": float, "f5d": float, "f10d": float, "f20d": float,
+          "checks": [
+            {"name": "today_in_5d",  "ok": bool, "delta": float},
+            {"name": "5d_in_10d",    "ok": bool, "delta": float},
+            {"name": "10d_in_20d",   "ok": bool, "delta": float},
+          ],
+        }
+    """
+    today = _to_float(record.get("MainNetFlow"))
+    f5d = _to_float(record.get("MainNetFlow5D"))
+    f10d = _to_float(record.get("MainNetFlow10D"))
+    f20d = _to_float(record.get("MainNetFlow20D"))
+
+    def _nested_ok(bigger: Optional[float], smaller: Optional[float]) -> tuple:
+        """bigger 应包含 smaller（同方向累计），且差值非负（同号时）。"""
+        if bigger is None or smaller is None:
+            return True, 0.0  # 缺字段不视为失败
+        delta = bigger - smaller
+        # 同号情况下 bigger 的绝对值应 >= smaller 的绝对值（容忍浮点抖动）
+        ok = abs(bigger) + tolerance * max(abs(bigger), abs(smaller), 1.0) >= abs(smaller)
+        return ok, delta
+
+    checks = [
+        {"name": "today_in_5d", "ok": _nested_ok(f5d, today)[0], "delta": _nested_ok(f5d, today)[1]},
+        {"name": "5d_in_10d",   "ok": _nested_ok(f10d, f5d)[0],  "delta": _nested_ok(f10d, f5d)[1]},
+        {"name": "10d_in_20d",  "ok": _nested_ok(f20d, f10d)[0], "delta": _nested_ok(f20d, f10d)[1]},
+    ]
+    return {
+        "ok": all(c["ok"] for c in checks),
+        "today": today, "f5d": f5d, "f10d": f10d, "f20d": f20d,
+        "checks": checks,
+    }
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     # 自测：用 fund flow 拿真实数据算净额率
@@ -226,3 +293,11 @@ if __name__ == "__main__":
             print(f"  成交额(主力口径): {m['turnover']/1e8:.2f}亿")
             print(f"  净额率: {m['net_rate']}%")
             print(f"  近5日累计: {m['main_net_flow_5d']/1e8:.2f}亿" if m['main_net_flow_5d'] else "  近5日累计: None")
+
+    # 口径自检：5D/10D/20D 嵌套包含关系
+    print("\n=== 累计字段口径验证 ===")
+    for r in r:
+        v = verify_net_flow_window_consistency(r)
+        print(f"{r.get('name')}: ok={v['ok']} today={v['today']} 5D={v['f5d']} 10D={v['f10d']} 20D={v['f20d']}")
+        for c in v["checks"]:
+            print(f"  {c['name']}: ok={c['ok']} delta={c['delta']}")

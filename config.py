@@ -99,7 +99,13 @@ MINUTE_CACHE_DAYS = int(os.getenv("MINUTE_CACHE_DAYS", "5"))
 # ============================================================
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "8200"))
-CORS_ORIGINS = ["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:5173"]
+
+# CORS 允许的源（逗号分隔，环境变量 CORS_ORIGINS 覆盖）
+# 默认仅放行本地开发端口，生产部署应通过环境变量显式配置允许的前端域
+_default_cors = ["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:5173"]
+CORS_ORIGINS = [
+    s.strip() for s in os.getenv("CORS_ORIGINS", "").split(",") if s.strip()
+] or _default_cors
 
 # ============================================================
 # 辅助函数

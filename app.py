@@ -54,6 +54,8 @@ from data_cache import (
     init_cache, is_ready, refresh_cache, get_max_n,
     get_codes as cache_get_codes, get_sectors as cache_get_sectors,
     get_daily_map, get_circ_mv_map, get_circ_mv, start_background_refresh,
+    trigger_background_refresh, is_refresh_in_progress, get_refresh_last_error,
+    get_updated_time,
 )
 
 # ============================================================
@@ -83,7 +85,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS + ["*"],  # 开发环境放宽
+    allow_origins=CORS_ORIGINS,  # 仅放行 config.CORS_ORIGINS（生产用环境变量配置）
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -98,6 +100,10 @@ class HealthResponse(BaseModel):
     timestamp: str
     trading: bool
     storage: Dict[str, Any]
+    cache_ready: bool = False
+    cache_refreshing: bool = False
+    cache_last_error: Optional[str] = None
+    cache_updated: Optional[str] = None
 
 
 class SectorRow(BaseModel):
@@ -245,7 +251,7 @@ def _update_meta_with_realtime(daily_map: Dict, circ_mv_map: Dict) -> None:
 # ============================================================
 @app.get("/api/health", response_model=HealthResponse)
 async def health():
-    """健康检查 + 存储状态"""
+    """健康检查 + 存储状态 + 缓存状态"""
     storage = get_storage()
     stats = storage.get_stats()
     return {
@@ -253,6 +259,10 @@ async def health():
         "timestamp": datetime.now().isoformat(),
         "trading": is_trading_time(),
         "storage": stats,
+        "cache_ready": is_ready(),
+        "cache_refreshing": is_refresh_in_progress(),
+        "cache_last_error": get_refresh_last_error(),
+        "cache_updated": get_updated_time(),
     }
 
 
@@ -277,18 +287,17 @@ async def get_sectors(
     """板块列表 + 当前强度（宽表主数据）。
 
     数据来源：启动时预加载的 data_cache（10 交易日），<5ms 响应。
-    force_refresh=True 时重新拉取最新数据。
+    force_refresh=True 时触发后台异步刷新（非阻塞），立即返回当前缓存数据。
+    调用方可通过 /api/health 的 cache_refreshing 字段轮询进度。
 
     Args:
         n: 强度判定窗口天数（须 ≤ 缓存窗口，否则用缓存窗口）
-        force_refresh: True 时跳过缓存，实时拉取
+        force_refresh: True 时触发后台刷新（不阻塞本次响应）
     """
-    # 强制刷新：重新拉取数据
+    # 强制刷新：后台异步触发，立即返回当前缓存
     if force_refresh:
-        logger.info("get_sectors: force_refresh triggered")
-        refresh_cache()
-        if not is_ready():
-            raise HTTPException(status_code=503, detail="cache refresh failed")
+        triggered = trigger_background_refresh()
+        logger.info("get_sectors: force_refresh triggered=%s", triggered)
 
     # 未就绪：尝试初始化
     if not is_ready():
@@ -712,17 +721,16 @@ def _build_summary(
     坑：westock 不给单日历史成交额，历史记录 turnover=None。
     早期实现只累加"净流入 AND 成交额都有效"的记录，导致历史估算值被丢，
     近3日/近5日都只算到今日1条 → 三窗数据完全相同。
-    修复成交额近似优先级：
-      1. 该日自身成交额（交易时段有效）
-      2. 今日成交额（开盘前为0也无效）
-      3. 流通市值 × 经验日均换手率 2%（兜底，非交易时段/历史日必走此项）
-    净流入累加必须包含所有有效历史估算值。
+
+    成交额近似优先级（v2 修订）：
+      该日自身成交额（交易时段对今日有效）
+      → 流通市值 × 规模分档日均换手率（兜底，历史日和非交易时段必走此项）
+    历史日不再用"今日成交额"做近似——开盘不久时今日成交额远小于日均，
+    会把所有历史日的成交额也压小，导致历史净额率被系统性低估。
     """
     if not records or days <= 0:
         return None
     subset = records[:days]
-    # 今日成交额：作为历史成交额缺失时的日均近似
-    today_turnover = subset[0].get("turnover") if subset else None
     # 流通市值 × 规模分档换手率（circ_mv_yi 单位亿 → 元）
     scale = get_scale(circ_mv_yi) if circ_mv_yi else "小盘"
     rate = SCALE_TURNOVER_RATE.get(scale, 0.02)
@@ -731,16 +739,20 @@ def _build_summary(
     total_net = 0.0
     total_turnover = 0.0
     valid = 0
-    for r in subset:
+    for idx, r in enumerate(subset):
         net = r.get("net_flow")
         if net is None:
             continue
-        # 成交额缺失时用近似补齐：今日成交额 → 流通市值×2% 兜底
-        turnover = r.get("turnover")
-        if turnover is None or turnover <= 0:
-            turnover = today_turnover if (today_turnover and today_turnover > 0) else None
-        if (turnover is None or turnover <= 0) and fallback_turnover:
-            turnover = fallback_turnover
+        # 成交额：今日用自身实测值；历史日直接用"流通市值×换手率"兜底，
+        # 跳过"今日成交额"近似（开盘不久时该值远低于日均，会系统性低估历史净额率）
+        if idx == 0:
+            turnover = r.get("turnover")
+            if turnover is None or turnover <= 0:
+                turnover = fallback_turnover
+        else:
+            turnover = r.get("turnover")
+            if turnover is None or turnover <= 0:
+                turnover = fallback_turnover
         if turnover is None or turnover <= 0:
             continue
         total_net += net

@@ -42,6 +42,8 @@ _cache: Dict[str, Any] = {
 }
 _ready = False  # 缓存就绪标记
 _preload_n = 10  # 默认预加载 10 个交易日
+_refresh_in_progress = False  # 后台刷新去重锁标记
+_refresh_last_error: Optional[str] = None  # 最近一次刷新错误（None 表示成功或未跑过）
 
 
 def is_ready() -> bool:
@@ -188,6 +190,62 @@ def refresh_cache(n: Optional[int] = None) -> bool:
     if n is None:
         n = get_max_n() or _preload_n
     return init_cache(n=n)
+
+
+def is_refresh_in_progress() -> bool:
+    """后台刷新是否正在进行（用于 API 去重轮询）。"""
+    with _lock:
+        return _refresh_in_progress
+
+
+def get_refresh_last_error() -> Optional[str]:
+    """最近一次后台刷新的错误描述（None 表示成功或未跑过）。"""
+    with _lock:
+        return _refresh_last_error
+
+
+def trigger_background_refresh(n: Optional[int] = None) -> bool:
+    """触发后台异步刷新（非阻塞，立即返回）。
+
+    去重：若已有刷新在进行中，直接返回 False（不重复拉取）。
+    API 调用方可通过 is_refresh_in_progress() 轮询进度，
+    通过 get_refresh_last_error() 获取上次错误。
+
+    Args:
+        n: None 时用已有 max_n
+
+    Returns:
+        True 表示已触发新刷新；False 表示已有刷新在进行中（跳过）
+    """
+    global _refresh_in_progress, _refresh_last_error
+    with _lock:
+        if _refresh_in_progress:
+            logger.info("data_cache: background refresh already in progress, skip")
+            return False
+        _refresh_in_progress = True
+        _refresh_last_error = None
+
+    target_n = n if n is not None else (get_max_n() or _preload_n)
+
+    def _bg():
+        global _refresh_in_progress, _refresh_last_error
+        try:
+            ok = init_cache(n=target_n)
+            if not ok:
+                with _lock:
+                    _refresh_last_error = "init_cache returned False"
+        except Exception as e:
+            with _lock:
+                _refresh_last_error = str(e)
+            logger.error("data_cache: background refresh error: %s", e, exc_info=True)
+        finally:
+            with _lock:
+                _refresh_in_progress = False
+
+    t = threading.Thread(target=_bg, daemon=True, name="data_cache_bg_refresh")
+    t.start()
+    logger.info("data_cache: background refresh triggered (n=%d)", target_n)
+    return True
 
 
 def _background_refresh(interval_sec: int = 60) -> None:
