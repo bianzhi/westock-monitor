@@ -74,7 +74,7 @@ def westock(*args: str, raw: bool = False, timeout: Optional[int] = None) -> Any
 # ============================================================
 # 高层 API
 # ============================================================
-def fund_flow(codes: Union[str, List[str]], raw: bool = True) -> List[Dict]:
+def fund_flow(codes: Union[str, List[str]], raw: bool = True, asof_date: Optional[str] = None) -> List[Dict]:
     """批量查板块资金流（主力净流入 MainNetFlow 等）。
 
     自动按 WESTOCK_BATCH_SIZE 分批，WESTOCK_WORKERS 并发执行。
@@ -83,6 +83,7 @@ def fund_flow(codes: Union[str, List[str]], raw: bool = True) -> List[Dict]:
     Args:
         codes: 单个代码字符串，或代码列表
         raw: 是否输出 JSON
+        asof_date: YYYY-MM-DD，查询指定交易日数据（None 表示今日）
 
     Returns:
         合并后的板块资金流列表，每条含 MainNetFlow / MainInFlow / MainOutFlow 等
@@ -96,7 +97,10 @@ def fund_flow(codes: Union[str, List[str]], raw: bool = True) -> List[Dict]:
 
     def _fetch_batch(batch: List[str]) -> List[Dict]:
         codes_str = ",".join(batch)
-        data = westock("fund", "flow", codes_str, raw=raw)
+        args = ["fund", "flow", codes_str]
+        if asof_date:
+            args.extend(["--date", asof_date])
+        data = westock(*args, raw=raw)
         if isinstance(data, list):
             return data
         if isinstance(data, dict) and "data" in data:

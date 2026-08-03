@@ -237,7 +237,7 @@ def collect_minute_snapshot() -> Dict[str, Any]:
 
     # 3. 组装快照 + 差分
     snapshot_list: List[Dict] = []
-    prev_snapshot = storage.get_last_minute_snapshot()  # {code: {main_net_flow, ...}}
+    prev_snapshot = storage.get_last_minute_snapshot()  # {code: {main_net_flow, turnover, ...}}
 
     for code in codes:
         flow = flow_map.get(code, {})
@@ -252,11 +252,20 @@ def collect_minute_snapshot() -> Dict[str, Any]:
 
         # 差分：本分钟净流入 = 本分钟累计 - 上分钟累计
         minute_delta = None
+        turnover_delta = None
+        is_open_anchor = 0
         prev = prev_snapshot.get(code)
         if prev and main_net_flow is not None:
             prev_mnf = prev.get("main_net_flow")
             if prev_mnf is not None:
                 minute_delta = main_net_flow - prev_mnf
+            # 成交额差分（本分钟成交额 = 本分钟累计 - 上分钟累计）
+            prev_turnover = prev.get("turnover")
+            if turnover is not None and prev_turnover is not None:
+                turnover_delta = turnover - prev_turnover
+        # 开盘第一分钟：无 prev 快照，标记 is_open_anchor=1
+        if prev is None:
+            is_open_anchor = 1
 
         snapshot_list.append({
             "code": code,
@@ -265,6 +274,8 @@ def collect_minute_snapshot() -> Dict[str, Any]:
             "turnover": turnover,                # 当日累计成交额 (元，自算)
             "circ_mv": circ_mv,                  # 流通市值(暂缺)
             "minute_delta": minute_delta,        # 本分钟净流入增量 (元)
+            "turnover_delta": turnover_delta,    # 本分钟成交额增量 (元)
+            "is_open_anchor": is_open_anchor,    # 0/1 开盘第一条快照
             "main_inflow": extract_main_inflow(flow),
             "main_outflow": extract_main_outflow(flow),
         })
@@ -402,12 +413,16 @@ def collect_daily_records(code: str, n: int = 5) -> List[Dict]:
     return records
 
 
-def collect_all_sectors_daily(n: int = 5) -> Tuple[Dict[str, List[Dict]], Dict[str, float]]:
+def collect_all_sectors_daily(n: int = 5, asof_date: Optional[str] = None) -> Tuple[Dict[str, List[Dict]], Dict[str, float]]:
     """拉取所有板块近n日日级数据 + 流通市值。
 
     优化：
       - 今日实时：批量 westock + 批量腾讯
       - 历史 T-1..T-(n-1)：从批量结果中用累计差分估算
+
+    Args:
+        n: 窗口天数
+        asof_date: YYYY-MM-DD，查询指定交易日（None 表示今日）
 
     Returns:
         (daily_map, circ_mv_map)
@@ -418,10 +433,10 @@ def collect_all_sectors_daily(n: int = 5) -> Tuple[Dict[str, List[Dict]], Dict[s
     if not codes:
         return {}, {}
 
-    logger.info("collect_all_sectors_daily: start, codes=%d, n=%d", len(codes), n)
+    logger.info("collect_all_sectors_daily: start, codes=%d, n=%d, asof=%s", len(codes), n, asof_date)
 
-    # 批量 westock fund flow
-    flow_records = fund_flow(codes, raw=True)
+    # 批量 westock fund flow（支持指定日期）
+    flow_records = fund_flow(codes, raw=True, asof_date=asof_date)
     flow_map: Dict[str, Dict] = {}
     metrics_map: Dict[str, Dict] = {}
     for r in flow_records:
@@ -430,13 +445,17 @@ def collect_all_sectors_daily(n: int = 5) -> Tuple[Dict[str, List[Dict]], Dict[s
             flow_map[code] = r
             metrics_map[code] = calc_sector_metrics(r, TURNOVER_METHOD)
 
-    today = date.today()
+    anchor_date = date.fromisoformat(asof_date) if asof_date else date.today()
     daily_map: Dict[str, List[Dict]] = {}
-    circ_mv_map: Dict[str, float] = {}  # fund flow 不提供流通市值，暂空
+    circ_mv_map: Dict[str, float] = {}
 
     # 预计算交易日列表（所有板块共用）
-    trading_days = get_last_n_trading_days(n + 1, today) if n > 1 else []
-    history_days_all = trading_days[1:n + 1] if len(trading_days) > 1 else []
+    # 锚定 anchor 对应的最近交易日为 T-0，往前取 n-1 个历史交易日
+    anchor_td = anchor_date if is_trading_day(anchor_date) else get_previous_trading_day(anchor_date)
+    if anchor_td is None:
+        anchor_td = anchor_date
+    trading_days = get_last_n_trading_days(n, anchor_td) if n > 1 else []
+    history_days_all = trading_days[1:n] if len(trading_days) > 1 else []
 
     for code in codes:
         flow = flow_map.get(code, {})
@@ -451,8 +470,8 @@ def collect_all_sectors_daily(n: int = 5) -> Tuple[Dict[str, List[Dict]], Dict[s
 
         records: List[Dict] = []
         records.append({
-            "date": today.isoformat(),
-            "trade_date": today.strftime("%Y%m%d"),
+            "date": anchor_date.isoformat(),
+            "trade_date": anchor_date.strftime("%Y%m%d"),
             "net_flow": today_net,
             "turnover": today_turnover,
             "circ_mv": today_circ_mv,

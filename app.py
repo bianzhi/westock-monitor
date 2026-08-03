@@ -35,7 +35,7 @@ from pydantic import BaseModel
 from config import (
     API_HOST, API_PORT, CORS_ORIGINS,
     STRENGTH_WINDOW_N, DISPLAY_DAYS, SUMMARY_3D, SUMMARY_5D,
-    SCALE_THRESHOLDS, get_scale, SCALE_TURNOVER_RATE,
+    SCALE_THRESHOLDS, get_scale, SCALE_TURNOVER_RATE, LOG_DIR,
 )
 from sectors import DEFAULT_SECTORS, get_default_sector_map
 from storage import get_storage
@@ -68,9 +68,18 @@ CACHE_TTL_SEC = 15  # 15s 内重复请求直接返回缓存
 # ============================================================
 # 日志配置
 # ============================================================
+from logging.handlers import RotatingFileHandler
+
+LOG_FILE = LOG_DIR / "app.log"
+# 单文件最大 10MB，保留 3 个备份卷（共 ~40MB）
+_file_handler = RotatingFileHandler(
+    LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8",
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(), _file_handler],
 )
 logger = logging.getLogger("app")
 
@@ -531,8 +540,10 @@ async def get_sector_minute(
             "time": hhmm,
             "timestamp": ts,
             "main_net_flow": d.get("main_net_flow"),       # 当日累计(元)
-            "minute_delta": d.get("minute_delta"),          # 本分钟增量(元)
+            "minute_delta": d.get("minute_delta"),          # 本分钟净流入增量(元)
             "turnover": d.get("turnover"),
+            "turnover_delta": d.get("turnover_delta"),      # 本分钟成交额增量(元)
+            "is_open_anchor": d.get("is_open_anchor", 0),   # 0/1 开盘第一条
             "circ_mv": d.get("circ_mv"),
             "main_inflow": d.get("main_inflow"),
             "main_outflow": d.get("main_outflow"),
@@ -625,6 +636,156 @@ async def get_strength_ranking(
         top_weak=top_weak,
         level_distribution=level_distribution,
     )
+
+
+# ============================================================
+# 历史回看
+# ============================================================
+@app.get("/api/sectors/history", response_model=SectorListResponse)
+async def get_sectors_history(
+    date: str = Query(..., description="YYYY-MM-DD，查询日期"),
+    n: int = Query(STRENGTH_WINDOW_N, description="强度判定窗口"),
+):
+    """历史回看：查询指定日期的板块强度宽表。
+
+    调用 westock fund flow --date 拉取指定日期的资金流数据，
+    用当日累计 + 5D/10D/20D 分段差分重建近 n 日历史，计算强度。
+    注意：历史数据量较大时耗时 2-5s（实时 CLI 调用），建议前端加 loading 状态。
+    """
+    try:
+        daily_map, circ_mv_map = collect_all_sectors_daily(n=n, asof_date=date)
+    except Exception as e:
+        logger.error("history collect failed for %s: %s", date, e, exc_info=True)
+        raise HTTPException(status_code=503, detail=f"data fetch failed: {e}")
+
+    storage = get_storage()
+    _ensure_meta()
+    sector_list = load_sectors()
+    meta_map = {m["code"]: m for m in storage.get_all_sector_meta()}
+
+    if not sector_list:
+        raise HTTPException(status_code=500, detail="no sector data")
+
+    rows: List[SectorRow] = []
+
+    for sec in sector_list:
+        code = sec["code"]
+        records = daily_map.get(code, [])
+        meta = meta_map.get(code, {})
+
+        today_rec = records[0] if records else {}
+        today_net = today_rec.get("net_flow")
+        today_turnover = today_rec.get("turnover")
+
+        circ_mv_yi = circ_mv_map.get(code) or meta.get("circ_mv_yi")
+        scale = get_scale(circ_mv_yi) if circ_mv_yi else (meta.get("scale") or "小盘")
+
+        history = _build_history(records, None, n)
+        summary_3d = _build_summary(records, SUMMARY_3D, circ_mv_yi)
+        summary_5d = _build_summary(records, SUMMARY_5D, circ_mv_yi)
+        strength = _calc_strength_from_records(records, circ_mv_yi, n)
+
+        rows.append(SectorRow(
+            code=code,
+            name=sec.get("name") or meta.get("name", ""),
+            l1=sec.get("l1") or meta.get("l1"),
+            circ_mv_yi=circ_mv_yi,
+            scale=scale,
+            today_net_flow_yi=_to_yi(today_net),
+            today_turnover_yi=_to_yi(today_turnover),
+            today_net_rate=_net_rate(today_net, today_turnover),
+            history=history,
+            summary_3d=summary_3d,
+            summary_5d=summary_5d,
+            strength_value=strength["value"],
+            strength_level=strength["level"],
+        ))
+
+    rows.sort(key=lambda r: r.strength_value, reverse=True)
+
+    return SectorListResponse(
+        date=date,
+        last_update=datetime.now().isoformat(),
+        n_window=n,
+        sectors=rows,
+        total=len(rows),
+    )
+
+
+# ============================================================
+# CSV 导出
+# ============================================================
+import csv
+import io
+
+from fastapi.responses import StreamingResponse
+
+
+@app.get("/api/sectors/export")
+async def export_sectors_csv(
+    n: int = Query(STRENGTH_WINDOW_N, description="强度判定窗口"),
+):
+    """导出板块强度宽表为 CSV。
+
+    Returns:
+        CSV 文件流，Content-Disposition: attachment
+    """
+    sectors_resp = await get_sectors(n=n)
+    rows = sectors_resp.sectors
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # 表头
+    writer.writerow([
+        "板块名称", "代码", "一级行业", "流通市值(亿)", "规模",
+        "今日净流入(亿)", "今日净额率(%)",
+        "近3日净流入(亿)", "近3日净额率(%)",
+        "近5日净流入(亿)", "近5日净额率(%)",
+        "强度判定", "强度值",
+    ])
+
+    for r in rows:
+        writer.writerow([
+            r.name, r.code, r.l1 or "", r.circ_mv_yi, r.scale or "",
+            r.today_net_flow_yi, r.today_net_rate,
+            r.summary_3d.net_flow_yi if r.summary_3d else "", r.summary_3d.net_rate if r.summary_3d else "",
+            r.summary_5d.net_flow_yi if r.summary_5d else "", r.summary_5d.net_rate if r.summary_5d else "",
+            r.strength_level, r.strength_value,
+        ])
+
+    output.seek(0)
+    filename = f"westock_sectors_{datetime.now().strftime('%Y%m%d')}.csv"
+
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv; charset=utf-8-sig",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+# ============================================================
+# 历史回看
+# ============================================================
+@app.get("/api/alerts")
+async def get_alerts(
+    date: Optional[str] = Query(None, description="YYYYMMDD，默认全部"),
+    limit: int = Query(50, description="最多返回条数"),
+):
+    """获取强度档位变化告警日志。
+
+    告警在后台缓存刷新时自动检测，档位变化（如 普通→强）时写入。
+    """
+    try:
+        alerts = get_storage().get_alerts(trade_date=date, limit=limit)
+        return {
+            "total": len(alerts),
+            "alerts": alerts,
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        logger.error("get_alerts failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================
@@ -791,11 +952,15 @@ def _calc_strength_from_records(
 
 
 # ============================================================
-# 启动
+# 应用生命周期（FastAPI ≥0.93 推荐 lifespan 替代 on_event）
 # ============================================================
-@app.on_event("startup")
-async def startup_event():
-    """应用启动时初始化：后台预热 + 后台加载缓存"""
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """应用启动/关闭时执行。"""
+    # ---- 启动 ----
     logger.info("=== app startup ===")
     _ensure_meta()
     storage = get_storage()
@@ -825,6 +990,15 @@ async def startup_event():
 
     threading.Thread(target=_bg_init, daemon=True, name="startup_init").start()
     logger.info("app startup complete (cache loading in background)")
+
+    yield  # 应用运行中...
+
+    # ---- 关闭 ----
+    logger.info("=== app shutdown ===")
+
+
+# 将 lifespan 注册到 FastAPI 路由（定义在 app 之后，不能放在构造函数里）
+app.router.lifespan_context = lifespan
 
 
 def main():

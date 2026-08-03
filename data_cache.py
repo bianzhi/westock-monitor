@@ -45,6 +45,9 @@ _preload_n = 10  # 默认预加载 10 个交易日
 _refresh_in_progress = False  # 后台刷新去重锁标记
 _refresh_last_error: Optional[str] = None  # 最近一次刷新错误（None 表示成功或未跑过）
 
+# 告警检测状态：记录上一次各板块的强度档位，刷新后对比变化
+_prev_strength: Dict[str, Dict[str, Any]] = {}  # {code: {"level": str, "value": float}}
+
 
 def is_ready() -> bool:
     """缓存是否就绪（启动预加载完成）。"""
@@ -231,7 +234,15 @@ def trigger_background_refresh(n: Optional[int] = None) -> bool:
         global _refresh_in_progress, _refresh_last_error
         try:
             ok = init_cache(n=target_n)
-            if not ok:
+            if ok:
+                # 缓存刷新成功后检测强度档位变化
+                try:
+                    n_alerts = check_strength_alerts()
+                    if n_alerts > 0:
+                        logger.info("data_cache: %d strength alerts written", n_alerts)
+                except Exception as e:
+                    logger.warning("data_cache: strength alert check failed: %s", e)
+            else:
                 with _lock:
                     _refresh_last_error = "init_cache returned False"
         except Exception as e:
@@ -248,22 +259,128 @@ def trigger_background_refresh(n: Optional[int] = None) -> bool:
     return True
 
 
+# ============================================================
+# 强度档位变化告警检测
+# ============================================================
+def check_strength_alerts() -> int:
+    """检测所有板块强度档位变化，写入 alert_log。
+
+    从当前缓存读取所有板块的 daily + circ_mv，
+    调用 calc_sector_strength 计算最新强度，与上次快照对比。
+    仅在有档位变化时写入告警（如 普通→强）。
+
+    Returns:
+        写入告警条数
+    """
+    global _prev_strength
+    from strength import calc_sector_strength
+
+    daily_map = get_daily_map()
+    circ_mv_map = get_circ_mv_map()
+    sectors = get_sectors()
+    if not sectors or not daily_map:
+        return 0
+
+    from storage import get_storage
+    from datetime import datetime as dt
+
+    storage = get_storage()
+    now = dt.now()
+    trade_date = now.strftime("%Y%m%d")
+    alerts_written = 0
+
+    for sec in sectors:
+        code = sec["code"]
+        records = daily_map.get(code, [])
+        if not records:
+            continue
+        circ_mv_yi = circ_mv_map.get(code)
+        if circ_mv_yi is None or circ_mv_yi <= 0:
+            continue
+
+        strength = calc_sector_strength(records, circ_mv_yi, STRENGTH_WINDOW_N)
+        new_level = strength["level"]
+        new_value = strength["value"]
+
+        prev = _prev_strength.get(code)
+        if prev and prev.get("level") == new_level:
+            continue  # 档位未变
+
+        # 首次运行：只记录状态，不写告警
+        if prev is None:
+            _prev_strength[code] = {"level": new_level, "value": new_value}
+            continue
+
+        # 档位变化：写入告警
+        alert = {
+            "code": code,
+            "name": sec.get("name", ""),
+            "trade_date": trade_date,
+            "timestamp": now.isoformat(),
+            "old_level": prev["level"],
+            "new_level": new_level,
+            "old_value": prev["value"],
+            "new_value": new_value,
+            "net_rate_n": strength.get("net_rate_n"),
+            "net_flow_n_yi": round(strength.get("net_flow_n", 0) / 1e8, 2) if strength.get("net_flow_n") else None,
+            "scale": strength["scale"],
+        }
+        storage.insert_alert(alert)
+        _prev_strength[code] = {"level": new_level, "value": new_value}
+        alerts_written += 1
+        logger.info(
+            "data_cache: alert %s(%s) %s → %s (value %.3f → %.3f)",
+            sec.get("name", code), code,
+            prev["level"], new_level, prev["value"], new_value,
+        )
+
+    return alerts_written
+
+
 def _background_refresh(interval_sec: int = 60) -> None:
-    """后台定时刷新线程（交易时段每 60s 刷新一次）。"""
+    """后台定时刷新线程（交易时段每 60s 刷新一次）。
+
+    连续失败熔断：失败次数累计，每次失败后睡眠间隔翻倍（上限 16x），
+    成功一次则立即恢复到基础间隔。
+    """
     import time as _time
     from collector import is_trading_time
 
     logger.info("data_cache: background refresh started (interval=%ds)", interval_sec)
+    consecutive_failures = 0
+
     while True:
-        _time.sleep(interval_sec)
+        # 计算熔断后的实际睡眠间隔（指数退避，上限 16 倍）
+        if consecutive_failures > 0:
+            factor = min(2 ** consecutive_failures, 16)
+            sleep_sec = interval_sec * factor
+        else:
+            sleep_sec = interval_sec
+
+        _time.sleep(sleep_sec)
         now = datetime.now()
         trading = is_trading_time(now)
         if trading:
             try:
                 refresh_cache()
+                # 刷新成功后检测强度档位变化
+                try:
+                    check_strength_alerts()
+                except Exception:
+                    pass  # alert 检测失败不影响主流程
+                if consecutive_failures > 0:
+                    logger.info(
+                        "data_cache: background refresh recovered after %d failures",
+                        consecutive_failures,
+                    )
+                consecutive_failures = 0
                 logger.debug("data_cache: background refresh done at %s", now.isoformat())
             except Exception as e:
-                logger.warning("data_cache: background refresh error: %s", e)
+                consecutive_failures += 1
+                logger.warning(
+                    "data_cache: background refresh error (fail #%d, next sleep %ds): %s",
+                    consecutive_failures, interval_sec * min(2 ** consecutive_failures, 16), e,
+                )
 
 
 def start_background_refresh(interval_sec: int = 60) -> threading.Thread:

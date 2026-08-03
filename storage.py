@@ -134,9 +134,17 @@ class Storage:
                     main_inflow     REAL,
                     main_outflow    REAL,
                     minute_delta    REAL,               -- 本分钟净流入增量(元)
+                    turnover_delta  REAL,               -- 本分钟成交额增量(元)
+                    is_open_anchor  INTEGER DEFAULT 0,  -- 0/1 开盘第一条快照（无差分基准）
                     UNIQUE(code, timestamp)
                 )
             """)
+            # 旧表无 turnover_delta / is_open_anchor 列时补列（兼容升级）
+            for _col in ("turnover_delta", "is_open_anchor"):
+                try:
+                    cur.execute(f"ALTER TABLE minute_snapshot ADD COLUMN {_col} REAL")
+                except sqlite3.OperationalError:
+                    pass  # 列已存在
 
             # 索引：按代码+时间范围查询
             cur.execute("""
@@ -148,6 +156,28 @@ class Storage:
                 ON minute_snapshot(trade_date)
             """)
 
+            # 强度告警日志表
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS alert_log (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code            TEXT NOT NULL,
+                    name            TEXT,
+                    trade_date      TEXT NOT NULL,      -- YYYYMMDD
+                    timestamp       TEXT NOT NULL,      -- ISO datetime
+                    old_level       TEXT,               -- 旧档位
+                    new_level       TEXT,               -- 新档位
+                    old_value       REAL,               -- 旧强度值
+                    new_value       REAL,               -- 新强度值
+                    net_rate_n      REAL,               -- 近n日聚合净额率(%)
+                    net_flow_n_yi   REAL,               -- 近n日净流入(亿)
+                    scale           TEXT                -- 大盘/中盘/小盘
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_alert_date
+                ON alert_log(trade_date, timestamp)
+            """)
+
             conn.commit()
         logger.info("storage initialized: %s", self.db_path)
 
@@ -155,12 +185,13 @@ class Storage:
     # 分钟级快照写入
     # ============================================================
     def upsert_minute_snapshots(self, records: List[Dict]) -> int:
-        """批量写入分钟快照，自动计算差分 minute_delta。
+        """批量写入分钟快照，自动计算差分 minute_delta 和 turnover_delta。
 
         Args:
             records: 快照列表，每条含:
               code, timestamp, main_net_flow, turnover, circ_mv,
-              main_inflow, main_outflow, minute_delta(可空)
+              main_inflow, main_outflow,
+              minute_delta(可空), turnover_delta(可空), is_open_anchor(0/1)
 
         Returns:
             成功写入的行数
@@ -192,29 +223,39 @@ class Storage:
 
                 # 差分计算
                 minute_delta = r.get("minute_delta")
+                turnover_delta = r.get("turnover_delta")
+                prev = prev_snapshot.get(code)
                 if minute_delta is None and main_net_flow is not None:
-                    prev = prev_snapshot.get(code)
                     if prev and prev.get("main_net_flow") is not None:
                         minute_delta = main_net_flow - prev["main_net_flow"]
+                if turnover_delta is None and turnover is not None:
+                    if prev and prev.get("turnover") is not None:
+                        turnover_delta = turnover - prev["turnover"]
+                # 开盘锚点：无 prev 快照时标记
+                is_open_anchor = r.get("is_open_anchor", 0)
+                if prev is None:
+                    is_open_anchor = 1
 
                 try:
                     cur.execute("""
                         INSERT INTO minute_snapshot
                             (code, trade_date, timestamp, main_net_flow,
                              turnover, circ_mv, main_inflow, main_outflow,
-                             minute_delta)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             minute_delta, turnover_delta, is_open_anchor)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(code, timestamp) DO UPDATE SET
                             main_net_flow = excluded.main_net_flow,
                             turnover = excluded.turnover,
                             circ_mv = excluded.circ_mv,
                             main_inflow = excluded.main_inflow,
                             main_outflow = excluded.main_outflow,
-                            minute_delta = excluded.minute_delta
+                            minute_delta = excluded.minute_delta,
+                            turnover_delta = excluded.turnover_delta,
+                            is_open_anchor = excluded.is_open_anchor
                     """, (
                         code, trade_date, ts_str, main_net_flow,
                         turnover, circ_mv, main_inflow, main_outflow,
-                        minute_delta,
+                        minute_delta, turnover_delta, is_open_anchor,
                     ))
                     count += 1
                 except sqlite3.Error as e:
@@ -279,7 +320,7 @@ class Storage:
         code: str,
         trade_date: Optional[str] = None,
     ) -> List[Dict]:
-        """获取某板块某日的所有分钟增量（差分后的本分钟净流入）。
+        """获取某板块某日的所有分钟增量（差分后的本分钟净流入 + 成交额增量）。
 
         Args:
             code: 板块代码
@@ -297,7 +338,8 @@ class Storage:
             cur.execute(
                 """
                 SELECT timestamp, main_net_flow, turnover, circ_mv,
-                       main_inflow, main_outflow, minute_delta, trade_date
+                       main_inflow, main_outflow, minute_delta, trade_date,
+                       turnover_delta, is_open_anchor
                 FROM minute_snapshot
                 WHERE code = ? AND trade_date = ?
                 ORDER BY timestamp ASC
@@ -333,7 +375,8 @@ class Storage:
             cur.execute(
                 f"""
                 SELECT code, timestamp, main_net_flow, turnover, circ_mv,
-                       main_inflow, main_outflow, minute_delta, trade_date
+                       main_inflow, main_outflow, minute_delta, trade_date,
+                       turnover_delta, is_open_anchor
                 FROM minute_snapshot
                 WHERE code IN ({placeholders}) AND trade_date = ?
                 ORDER BY code, timestamp ASC
@@ -605,6 +648,71 @@ class Storage:
             logger.info("cleanup_old_minute_data: deleted %d rows (cutoff=%s)",
                         deleted, cutoff_date)
         return deleted
+
+    # ============================================================
+    # 强度告警日志
+    # ============================================================
+    def insert_alert(self, alert: Dict) -> int:
+        """写入一条强度档位变化告警。
+
+        Args:
+            alert: 告警记录，含 code, name, trade_date, timestamp,
+                   old_level, new_level, old_value, new_value,
+                   net_rate_n, net_flow_n_yi, scale
+
+        Returns:
+            插入行数（通常 1）
+        """
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO alert_log
+                    (code, name, trade_date, timestamp,
+                     old_level, new_level, old_value, new_value,
+                     net_rate_n, net_flow_n_yi, scale)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                alert["code"], alert.get("name"),
+                alert.get("trade_date", ""), alert["timestamp"],
+                alert.get("old_level"), alert.get("new_level"),
+                alert.get("old_value"), alert.get("new_value"),
+                alert.get("net_rate_n"), alert.get("net_flow_n_yi"),
+                alert.get("scale"),
+            ))
+            conn.commit()
+            return cur.lastrowid
+
+    def get_alerts(
+        self,
+        trade_date: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict]:
+        """获取告警日志。
+
+        Args:
+            trade_date: YYYYMMDD，None 表示全部
+            limit: 最多返回条数
+
+        Returns:
+            告警列表，按时间倒序
+        """
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            if trade_date:
+                cur.execute(
+                    """SELECT * FROM alert_log
+                    WHERE trade_date = ?
+                    ORDER BY timestamp DESC LIMIT ?""",
+                    (trade_date, limit),
+                )
+            else:
+                cur.execute(
+                    "SELECT * FROM alert_log ORDER BY timestamp DESC LIMIT ?",
+                    (limit,),
+                )
+            return [dict(row) for row in cur.fetchall()]
 
     # ============================================================
     # 统计信息

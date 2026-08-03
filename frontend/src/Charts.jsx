@@ -3,7 +3,8 @@ import ReactECharts from "echarts-for-react";
 
 /**
  * 分钟级资金流折线图
- * props: points = [{time, main_net_flow, minute_delta, turnover}, ...]
+ * props: points = [{time, main_net_flow, minute_delta, turnover,
+ *                    turnover_delta, is_open_anchor}, ...]
  */
 export function MinuteChart({ points = [] }) {
   const option = useMemo(() => {
@@ -11,16 +12,28 @@ export function MinuteChart({ points = [] }) {
     const cumNet = points.map((p) =>
       p.main_net_flow != null ? Number(p.main_net_flow) / 1e8 : null
     );
+    // 开盘第一分钟的净流入增量 = 当日累计，非真实分钟增量，过滤掉
     const minDelta = points.map((p) =>
-      p.minute_delta != null ? Number(p.minute_delta) / 1e8 : null
+      p.is_open_anchor || p.minute_delta == null
+        ? null
+        : Number(p.minute_delta) / 1e8
     );
     const turnover = points.map((p) =>
       p.turnover != null ? Number(p.turnover) / 1e8 : null
     );
+    // 本分钟成交额增量
+    const turnoverDelta = points.map((p) =>
+      p.is_open_anchor || p.turnover_delta == null
+        ? null
+        : Number(p.turnover_delta) / 1e8
+    );
     return {
       title: { text: "当日分钟级资金流", left: "center", textStyle: { fontSize: 14 } },
       tooltip: { trigger: "axis" },
-      legend: { data: ["累计净流入(亿)", "本分钟增量(亿)", "累计成交额(亿)"], top: 28 },
+      legend: {
+        data: ["累计净流入(亿)", "本分钟净流入(亿)", "累计成交额(亿)", "本分钟成交额(亿)"],
+        top: 28,
+      },
       grid: { left: 50, right: 30, top: 80, bottom: 40 },
       xAxis: { type: "category", data: xs, axisLabel: { rotate: 45, fontSize: 10 } },
       yAxis: [
@@ -36,7 +49,7 @@ export function MinuteChart({ points = [] }) {
           data: cumNet,
         },
         {
-          name: "本分钟增量(亿)",
+          name: "本分钟净流入(亿)",
           type: "bar",
           yAxisIndex: 0,
           itemStyle: {
@@ -52,6 +65,16 @@ export function MinuteChart({ points = [] }) {
           smooth: true,
           itemStyle: { color: "#95a5a6" },
           data: turnover,
+        },
+        {
+          name: "本分钟成交额(亿)",
+          type: "bar",
+          yAxisIndex: 1,
+          itemStyle: {
+            color: (params) =>
+              params.value >= 0 ? "#f39c12" : "#e67e22",
+          },
+          data: turnoverDelta,
         },
       ],
     };
@@ -92,11 +115,34 @@ export function DailyHistoryChart({ history = [] }) {
       legend: { data: ["净流入(亿)", "成交额(亿)"], top: 48 },
       grid: { left: 50, right: 30, top: 90, bottom: 40 },
       xAxis: { type: "category", data: xs },
-      yAxis: { type: "value", name: "亿元" },
+      yAxis: {
+        type: "value",
+        name: "亿元",
+        // y=0 参考线：正负分界，便于识别净流入方向
+        splitLine: { lineStyle: { type: "dashed", color: "#e0e0e0" } },
+      },
       series: [
         {
           name: "净流入(亿)",
           type: "bar",
+          // 柱状图顶部显示日期标签（估算值），区分连续同值柱子
+          label: {
+            show: true,
+            position: "top",
+            fontSize: 10,
+            color: "#999",
+            formatter: (params) => {
+              const est = estimated[params.dataIndex];
+              return est ? xs[params.dataIndex] : "";
+            },
+          },
+          // y=0 参考线
+          markLine: {
+            silent: true,
+            symbol: "none",
+            lineStyle: { type: "solid", color: "#aaa", width: 1 },
+            data: [{ yAxis: 0 }],
+          },
           itemStyle: {
             color: (params) => (params.value >= 0 ? "#e74c3c" : "#2ecc71"),
             borderColor: (params) =>
