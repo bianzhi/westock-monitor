@@ -952,53 +952,87 @@ def _calc_strength_from_records(
 
 
 # ============================================================
-# 应用生命周期（FastAPI ≥0.93 推荐 lifespan 替代 on_event）
+# 应用生命周期（FastAPI ≥0.93 推荐 lifespan，低版本回退 on_event）
 # ============================================================
-from contextlib import asynccontextmanager
+try:
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        """应用启动/关闭时执行。"""
+        # ---- 启动 ----
+        logger.info("=== app startup ===")
+        _ensure_meta()
+        storage = get_storage()
+        stats = storage.get_stats()
+        logger.info("storage stats: %s", stats)
+
+        # 后台线程：预热 + 缓存加载（不阻塞启动）
+        def _bg_init():
+            """后台初始化：预热 CLI → 加载缓存 → 启动定时刷新"""
+            import time as _time
+            try:
+                from westock import fund_flow
+                fund_flow(["pt01801081"], raw=True)
+                logger.info("westock CLI warmup done (background)")
+            except Exception as e:
+                logger.warning("westock CLI warmup failed: %s", e)
+
+            try:
+                ok = init_cache(n=10)
+                if ok:
+                    logger.info("data_cache: preloaded, %d codes ready", len(cache_get_codes()))
+                    start_background_refresh(interval_sec=60)
+                else:
+                    logger.error("data_cache: preload FAILED")
+            except Exception as e:
+                logger.error("data_cache: preload error: %s", e, exc_info=True)
+
+        threading.Thread(target=_bg_init, daemon=True, name="startup_init").start()
+        logger.info("app startup complete (cache loading in background)")
+
+        yield  # 应用运行中...
+
+        # ---- 关闭 ----
+        logger.info("=== app shutdown ===")
 
 
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    """应用启动/关闭时执行。"""
-    # ---- 启动 ----
-    logger.info("=== app startup ===")
-    _ensure_meta()
-    storage = get_storage()
-    stats = storage.get_stats()
-    logger.info("storage stats: %s", stats)
+    # 将 lifespan 注册到 FastAPI 路由（定义在 app 之后，不能放在构造函数里）
+    app.router.lifespan_context = lifespan
 
-    # 后台线程：预热 + 缓存加载（不阻塞启动）
-    def _bg_init():
-        """后台初始化：预热 CLI → 加载缓存 → 启动定时刷新"""
-        import time as _time
-        try:
-            from westock import fund_flow
-            fund_flow(["pt01801081"], raw=True)
-            logger.info("westock CLI warmup done (background)")
-        except Exception as e:
-            logger.warning("westock CLI warmup failed: %s", e)
+except ImportError:
+    # Python <3.7 无 asynccontextmanager，或 FastAPI <0.93 不支持 lifespan
+    logger.warning("lifespan not available, falling back to on_event")
 
-        try:
-            ok = init_cache(n=10)
-            if ok:
-                logger.info("data_cache: preloaded, %d codes ready", len(cache_get_codes()))
-                start_background_refresh(interval_sec=60)
-            else:
-                logger.error("data_cache: preload FAILED")
-        except Exception as e:
-            logger.error("data_cache: preload error: %s", e, exc_info=True)
+    @app.on_event("startup")
+    async def _startup_event():
+        logger.info("=== app startup (on_event) ===")
+        _ensure_meta()
+        storage = get_storage()
+        stats = storage.get_stats()
+        logger.info("storage stats: %s", stats)
 
-    threading.Thread(target=_bg_init, daemon=True, name="startup_init").start()
-    logger.info("app startup complete (cache loading in background)")
+        def _bg_init():
+            import time as _time
+            try:
+                from westock import fund_flow
+                fund_flow(["pt01801081"], raw=True)
+                logger.info("westock CLI warmup done (background)")
+            except Exception as e:
+                logger.warning("westock CLI warmup failed: %s", e)
 
-    yield  # 应用运行中...
+            try:
+                ok = init_cache(n=10)
+                if ok:
+                    logger.info("data_cache: preloaded, %d codes ready", len(cache_get_codes()))
+                    start_background_refresh(interval_sec=60)
+                else:
+                    logger.error("data_cache: preload FAILED")
+            except Exception as e:
+                logger.error("data_cache: preload error: %s", e, exc_info=True)
 
-    # ---- 关闭 ----
-    logger.info("=== app shutdown ===")
-
-
-# 将 lifespan 注册到 FastAPI 路由（定义在 app 之后，不能放在构造函数里）
-app.router.lifespan_context = lifespan
+        threading.Thread(target=_bg_init, daemon=True, name="startup_init").start()
+        logger.info("app startup complete (cache loading in background)")
 
 
 def main():
