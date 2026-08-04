@@ -132,10 +132,8 @@ BACKEND_PID=$!
 
 # 前端 dev server (Vite, port 5173)
 echo "   启动前端 (端口 5173)..."
-nohup npm run dev -- --host 0.0.0.0 --port 5173 \
-    > "$LOGDIR/frontend.log" 2>&1 &
+nohup npm start -- --prefix "$PROJECT_DIR/frontend" > "$LOGDIR/frontend.log" 2>&1 &
 FRONTEND_PID=$!
-cd "$PROJECT_DIR"
 
 # 等待启动
 sleep 2

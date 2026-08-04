@@ -1,6 +1,6 @@
 # Python 依赖（最小版本兼容 Python 3.6，生产/开发均可用）
 fastapi>=0.83.0
-uvicorn>=0.17.0
+uvicorn>=0.16.0,<0.17.0
 pydantic>=1.9.0,<3.0
 requests>=2.27.0
 python-dotenv>=0.19.0
