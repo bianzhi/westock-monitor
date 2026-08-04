@@ -49,7 +49,8 @@ def westock(*args: str, raw: bool = False, timeout: Optional[int] = None) -> Any
     logger.debug("westock cmd: %s (timeout=%ss)", " ".join(cmd), t)
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=t,
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=t,
         )
         if result.returncode != 0:
             err = result.stderr.strip() or result.stdout.strip()
