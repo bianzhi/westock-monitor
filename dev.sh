@@ -109,12 +109,22 @@ echo "✅ Node.js $(node -v)"
 echo ""
 echo "🏗️  编译前端..."
 cd frontend
-if [ ! -d "node_modules" ]; then
+
+# 清除旧的 node_modules 和构建缓存（避免跨平台/GLIBC 不兼容的原生绑定残留）
+if [ ! -d "node_modules" ] || [ ! -d "dist" ]; then
+    rm -rf node_modules package-lock.json dist 2>/dev/null
     echo "   安装前端依赖..."
     npm install --silent
 fi
+
 npm run build -- --emptyOutDir 2>&1 | tail -2
-echo "✅ 前端编译完成 (frontend/dist/)"
+if [ -d "dist" ]; then
+    echo "✅ 前端编译完成 (frontend/dist/)"
+else
+    echo "❌ 前端编译失败，查看上方错误"
+    cd "$PROJECT_DIR"
+    exit 1
+fi
 cd "$PROJECT_DIR"
 
 # ----------------------------------------------------------
