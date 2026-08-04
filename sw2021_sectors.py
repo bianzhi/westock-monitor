@@ -91,7 +91,12 @@ class L2Industry(BaseModel):
         """对应的 westock pt 代码。"""
         return "pt" + "018" + self.code[1:]
 
-    @model_validator(mode="after") if _PYDANTIC_V2 else model_validator
+    if _PYDANTIC_V2:
+        _validate_decorator = model_validator(mode="after")
+    else:
+        _validate_decorator = model_validator
+
+    @_validate_decorator
     def _validate_l1_consistency(self):
         """校验 l1_code 在 SW_L1 中存在（延迟到 _validate 调用）。"""
         # 这里只做格式校验，存在性校验在模块加载后统一做
