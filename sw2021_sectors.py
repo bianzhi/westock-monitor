@@ -29,7 +29,25 @@
 from collections import OrderedDict
 from typing import Dict, List, Tuple, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+# Pydantic v1 / v2 兼容层
+from pydantic import BaseModel, Field
+
+# detect version
+try:
+    from pydantic import VERSION as _PYDANTIC_V
+    _PYDANTIC_V2 = _PYDANTIC_V.startswith("2")
+except (ImportError, AttributeError):
+    _PYDANTIC_V2 = False
+
+if _PYDANTIC_V2:
+    from pydantic import field_validator, model_validator  # noqa: F401
+else:
+    # Pydantic v1 shim: 提供同名占位，避免 ImportError
+    # field_validator 和 model_validator 在当前文件中实际未使用
+    # （model_validator 在第 59 行仅 return self，是无操作校验
+    #   保留装饰器以维护一致性，v1 下改为不做校验的 root_validator）
+    from pydantic import root_validator as model_validator  # noqa: F401
+    field_validator = None  # 未使用
 
 
 # ============================================================
@@ -37,19 +55,36 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 # ============================================================
 class L1Industry(BaseModel):
     """申万一级行业。"""
-    code: str = Field(..., description="申万一级 6 位代码，801 开头", pattern=r"^801\d{3}$")
+    if _PYDANTIC_V2:
+        code: str = Field(..., description="申万一级 6 位代码，801 开头", pattern=r"^801\d{3}$")
+    else:
+        code: str = Field(..., description="申万一级 6 位代码，801 开头", regex=r"^801\d{3}$")
     name: str = Field(..., description="一级行业名称")
 
-    model_config = {"frozen": True}  # 不可变，便于做字典 key
+    if _PYDANTIC_V2:
+        model_config = {"frozen": True}
+    else:
+        class Config:
+            frozen = True
 
 
 class L2Industry(BaseModel):
     """申万二级行业。"""
-    code: str = Field(..., description="申万二级 6 位代码，801 开头", pattern=r"^801\d{3}$")
+    if _PYDANTIC_V2:
+        code: str = Field(..., description="申万二级 6 位代码，801 开头", pattern=r"^801\d{3}$")
+    else:
+        code: str = Field(..., description="申万二级 6 位代码，801 开头", regex=r"^801\d{3}$")
     name: str = Field(..., description="二级行业名称")
-    l1_code: str = Field(..., description="所属一级 6 位代码", pattern=r"^801\d{3}$")
+    if _PYDANTIC_V2:
+        l1_code: str = Field(..., description="所属一级 6 位代码", pattern=r"^801\d{3}$")
+    else:
+        l1_code: str = Field(..., description="所属一级 6 位代码", regex=r"^801\d{3}$")
 
-    model_config = {"frozen": True}
+    if _PYDANTIC_V2:
+        model_config = {"frozen": True}
+    else:
+        class Config:
+            frozen = True
 
     @property
     def pt_code(self) -> str:

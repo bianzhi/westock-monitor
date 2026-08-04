@@ -132,9 +132,9 @@ nohup python3 -m uvicorn app:app --host 0.0.0.0 --port 8200 \
     > "$LOGDIR/backend.log" 2>&1 &
 BACKEND_PID=$!
 
-# 前端 dev server (Vite, port 5173) —— 用子 shell cd 确保目录正确
+# 前端 preview server（服务预编译的 dist/，无需原生编译，兼容老 OS）
 echo "   启动前端 (端口 5173)..."
-( cd "$PROJECT_DIR/frontend" && nohup npm run dev -- --host 0.0.0.0 --port 5173 \
+( cd "$PROJECT_DIR/frontend" && nohup npm run preview -- --host 0.0.0.0 --port 5173 \
     > "$LOGDIR/frontend.log" 2>&1 ) &
 FRONTEND_PID=$!
 
