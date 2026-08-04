@@ -91,11 +91,13 @@ if [ ! -d ".venv" ]; then
 fi
 source .venv/bin/activate
 
-if [ ! -f ".venv/.deps_installed" ]; then
-    echo "📦 安装 Python 依赖..."
-    pip install --upgrade pip -q
+if [ ! -f ".venv/.deps_installed" ] || [ "$PROJECT_DIR/requirements.txt" -nt ".venv/.deps_installed" ]; then
+    echo "📦 安装/更新 Python 依赖..."
+    pip install --upgrade pip -q 2>/dev/null
     pip install -r requirements.txt -q
     touch .venv/.deps_installed
+else
+    echo "✅ Python 依赖已是最新"
 fi
 
 echo "✅ Python $(python3 --version)"
@@ -130,9 +132,10 @@ nohup python3 -m uvicorn app:app --host 0.0.0.0 --port 8200 \
     > "$LOGDIR/backend.log" 2>&1 &
 BACKEND_PID=$!
 
-# 前端 dev server (Vite, port 5173)
+# 前端 dev server (Vite, port 5173) —— 用子 shell cd 确保目录正确
 echo "   启动前端 (端口 5173)..."
-nohup npm start -- --prefix "$PROJECT_DIR/frontend" > "$LOGDIR/frontend.log" 2>&1 &
+( cd "$PROJECT_DIR/frontend" && nohup npm run dev -- --host 0.0.0.0 --port 5173 \
+    > "$LOGDIR/frontend.log" 2>&1 ) &
 FRONTEND_PID=$!
 
 # 等待启动
