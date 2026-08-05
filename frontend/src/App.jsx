@@ -48,10 +48,10 @@ export default function App() {
 
   const [warmupRetries, setWarmupRetries] = useState(0);  // 预热重试进度
 
-  // 拉取板块列表（缓存预热期自动重试，最多 5 次，间隔 3s）
+  // 拉取板块列表（缓存预热期指数退避重试，最多 20 次，总时长 ~3 分钟）
   const loadSectors = useCallback(async () => {
     setLoading(true);
-    const MAX_RETRIES = 5;
+    const MAX_RETRIES = 20;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
         const data = await fetchSectors(n);
@@ -63,14 +63,15 @@ export default function App() {
       } catch (e) {
         const status = e.response?.status;
         if (status === 503 && attempt < MAX_RETRIES) {
-          // 缓存预热中，自动重试
           setWarmupRetries(attempt + 1);
+          // 指数退避：3s → 6s → 12s → 24s → 48s → 60s（封顶）
+          const delay = Math.min(3000 * Math.pow(2, attempt), 60000);
           message.loading({
-            content: `数据预热中，${3}s 后自动重试 (${attempt + 1}/${MAX_RETRIES})...`,
+            content: `数据预热中，${Math.round(delay / 1000)}s 后重试 (${attempt + 1}/${MAX_RETRIES})...`,
             key: "warmup",
-            duration: 3,
+            duration: Math.round(delay / 1000),
           });
-          await new Promise((r) => setTimeout(r, 3000));
+          await new Promise((r) => setTimeout(r, delay));
           continue;
         }
         message.error("加载失败: " + (e.response?.data?.detail || e.message));
