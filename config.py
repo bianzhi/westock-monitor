@@ -77,8 +77,13 @@ TURNOVER_METHOD = os.getenv("TURNOVER_METHOD", "all")
 # ============================================================
 # 采集间隔配置
 # ============================================================
-MINUTE_INTERVAL = int(os.getenv("MINUTE_INTERVAL", "60"))   # 分钟级采集间隔(秒)
+MINUTE_INTERVAL = int(os.getenv("MINUTE_INTERVAL", "60"))   # 全量分钟级采集间隔(秒)
 IDLE_SLEEP = int(os.getenv("IDLE_SLEEP", "30"))             # 非交易时段轮询间隔(秒)
+
+# 高频聚焦采集（只采选中的少量板块，用于分时图实时对比）
+FOCUSED_INTERVAL = int(os.getenv("FOCUSED_INTERVAL", "8"))   # 聚焦采集间隔(秒)，默认 8s
+FOCUSED_BACKOFF_BASE = int(os.getenv("FOCUSED_BACKOFF_BASE", "8"))   # 限流退避起始间隔(秒)
+FOCUSED_BACKOFF_MAX = int(os.getenv("FOCUSED_BACKOFF_MAX", "64"))    # 限流退避最大间隔(秒)
 
 # 流通市值日级采集时点（24h 制，HH:MM，逗号分隔）
 # 实测成分股反推累加耗时约 30-60s，盘前+盘后各一次足够

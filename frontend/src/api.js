@@ -43,4 +43,10 @@ export const fetchMinuteCompare = (method, start, end, tradeDate) =>
     .get("/minute/compare", { params: { method, start, end, trade_date: tradeDate } })
     .then((r) => r.data);
 
+export const focusMinuteCollect = (codes) =>
+  api.post("/minute/focus", { codes }).then((r) => r.data);
+
+export const unfocusMinuteCollect = () =>
+  api.post("/minute/focus", { codes: [] }).then((r) => r.data);
+
 export default api;

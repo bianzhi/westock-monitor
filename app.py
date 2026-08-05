@@ -687,6 +687,38 @@ async def get_minute_compare(
     }
 
 
+@app.post("/api/minute/focus")
+async def set_focus_codes(
+    body: Dict[str, Any],
+):
+    """设置高频聚焦采集的板块代码。
+
+    Request body: {"codes": ["pt01801081", "pt01801055", ...]}
+    传空列表即停止聚焦采集。
+    """
+    codes = body.get("codes", [])
+    from collector import set_focused_codes
+    n = set_focused_codes(codes)
+    return {
+        "status": "ok",
+        "focused_count": n,
+        "focused_codes": codes,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@app.get("/api/minute/focus/status")
+async def get_focus_status():
+    """获取当前聚焦采集的板块列表。"""
+    from collector import get_focused_codes
+    codes = get_focused_codes()
+    return {
+        "focused_count": len(codes),
+        "focused_codes": codes,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
 @app.get("/api/strength/ranking", response_model=StrengthRankingResponse)
 async def get_strength_ranking(
     n: int = Query(STRENGTH_WINDOW_N),
@@ -1091,6 +1123,16 @@ try:
         threading.Thread(target=_bg_init, daemon=True, name="startup_init").start()
         logger.info("app startup complete (cache loading in background)")
 
+        # 启动高频聚焦采集线程（默认不采任何板块，等待前端 focus API 激活）
+        from collector import run_focused_loop
+        threading.Thread(target=run_focused_loop, daemon=True, name="focused_loop").start()
+        logger.info("focused loop started")
+
+        # 启动全量分钟采集线程（60s 全板块，为任意板块切换提供数据基础）
+        from collector import run_minute_loop
+        threading.Thread(target=run_minute_loop, daemon=True, name="minute_loop").start()
+        logger.info("minute loop started")
+
         yield  # 应用运行中...
 
         # ---- 关闭 ----
@@ -1133,6 +1175,16 @@ except ImportError:
 
         threading.Thread(target=_bg_init, daemon=True, name="startup_init").start()
         logger.info("app startup complete (cache loading in background)")
+
+        # 启动高频聚焦采集线程（默认不采任何板块，等待前端 focus API 激活）
+        from collector import run_focused_loop
+        threading.Thread(target=run_focused_loop, daemon=True, name="focused_loop").start()
+        logger.info("focused loop started")
+
+        # 启动全量分钟采集线程（60s 全板块，为任意板块切换提供数据基础）
+        from collector import run_minute_loop
+        threading.Thread(target=run_minute_loop, daemon=True, name="minute_loop").start()
+        logger.info("minute loop started")
 
 
 # ============================================================

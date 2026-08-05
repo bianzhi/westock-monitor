@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
   Layout, Table, Button, Input, Select, Card, Row, Col, Statistic,
-  message, Space, Modal, Descriptions, Spin, Tabs,
+  message, Space, Modal, Descriptions, Spin, Tabs, Switch, InputNumber,
 } from "antd";
 import {
   ReloadOutlined, PlayCircleOutlined, ThunderboltOutlined,
@@ -18,7 +18,7 @@ import { MinuteChart, DailyHistoryChart, NetRateCompareChart } from "./Charts";
 import SectorDetail from "./SectorDetail";
 import L1Tab from "./L1Tab";
 import CompareChart from "./CompareChart";
-import { fetchMinuteCompare } from "./api";
+import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect } from "./api";
 
 const { Header, Content, Footer } = Layout;
 
@@ -46,6 +46,19 @@ export default function App() {
   const [compareEnd, setCompareEnd] = useState(10);
   const [compareData, setCompareData] = useState(null);
   const [compareLoading, setCompareLoading] = useState(false);
+
+  // 高频模式
+  const [focusEnabled, setFocusEnabled] = useState(false);
+  const autoRefreshRef = useRef(null);
+
+  // 退出对比 Tab 或关闭高频模式时取消聚焦
+  useEffect(() => {
+    if (activeTab !== "compare" && focusEnabled) {
+      setFocusEnabled(false);
+      unfocusMinuteCollect().catch(() => {});
+      if (autoRefreshRef.current) clearInterval(autoRefreshRef.current);
+    }
+  }, [activeTab, focusEnabled]);
 
   const loadCompare = useCallback(async () => {
     setCompareLoading(true);
@@ -456,6 +469,35 @@ export default function App() {
                       <Button type="primary" icon={<ReloadOutlined />} onClick={loadCompare} loading={compareLoading}>
                         加载
                       </Button>
+                      <span>|</span>
+                      <Switch
+                        checked={focusEnabled}
+                        onChange={async (checked) => {
+                          setFocusEnabled(checked);
+                          if (checked) {
+                            // 开启高频模式：注册选中板块 + 8s 自动轮询
+                            const codes = compareData?.series?.map((s) => s.code) || [];
+                            if (codes.length > 0) {
+                              await focusMinuteCollect(codes);
+                              message.info(`已开启高频模式，${codes.length} 个板块 8s 刷新`);
+                              autoRefreshRef.current = setInterval(loadCompare, 8000);
+                            } else {
+                              message.warning("请先加载板块数据");
+                              setFocusEnabled(false);
+                            }
+                          } else {
+                            // 关闭高频模式
+                            await unfocusMinuteCollect();
+                            if (autoRefreshRef.current) clearInterval(autoRefreshRef.current);
+                            message.info("已关闭高频模式");
+                          }
+                        }}
+                        checkedChildren="高频"
+                        unCheckedChildren="高频"
+                      />
+                      {focusEnabled && (
+                        <span style={{ color: "#e74c3c", fontSize: 12 }}>8s 自动刷新中...</span>
+                      )}
                     </Space>
                   </Card>
                   <CompareChart
