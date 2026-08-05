@@ -49,4 +49,20 @@ export const focusMinuteCollect = (codes) =>
 export const unfocusMinuteCollect = () =>
   api.post("/minute/focus", { codes: [] }).then((r) => r.data);
 
+// 用户偏好
+export const fetchUserPrefs = () =>
+  api.get("/user/prefs").then((r) => r.data);
+
+export const saveUserPrefs = (prefs) =>
+  api.post("/user/prefs", prefs).then((r) => r.data);
+
+// 设置 Supabase auth token 到请求头（AuthGuard 登录后调用）
+export const setAuthToken = (token) => {
+  if (token) {
+    api.defaults.headers.common["Authorization"] = `Bearer ${token}`;
+  } else {
+    delete api.defaults.headers.common["Authorization"];
+  }
+};
+
 export default api;

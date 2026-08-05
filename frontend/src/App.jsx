@@ -18,7 +18,7 @@ import { MinuteChart, DailyHistoryChart, NetRateCompareChart } from "./Charts";
 import SectorDetail from "./SectorDetail";
 import L1Tab from "./L1Tab";
 import CompareChart from "./CompareChart";
-import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect } from "./api";
+import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect, fetchUserPrefs, saveUserPrefs } from "./api";
 import AuthGuard from "./components/AuthGuard";
 
 const { Header, Content, Footer } = Layout;
@@ -51,6 +51,30 @@ export default function App() {
   // 高频模式
   const [focusEnabled, setFocusEnabled] = useState(false);
   const autoRefreshRef = useRef(null);
+
+  const comparePrefsSaveRef = useRef(null);
+
+  // 加载用户偏好（恢复 m/n）
+  useEffect(() => {
+    fetchUserPrefs().then((data) => {
+      const prefs = data?.prefs || {};
+      if (prefs.compare_start != null) setCompareStart(prefs.compare_start);
+      if (prefs.compare_end != null) setCompareEnd(prefs.compare_end);
+      if (prefs.compare_method) setCompareMethod(prefs.compare_method);
+    }).catch(() => {});
+  }, []);
+
+  // 自动保存 m/n 到用户偏好（2s 防抖）
+  useEffect(() => {
+    if (comparePrefsSaveRef.current) clearTimeout(comparePrefsSaveRef.current);
+    comparePrefsSaveRef.current = setTimeout(() => {
+      saveUserPrefs({
+        compare_start: compareStart,
+        compare_end: compareEnd,
+        compare_method: compareMethod,
+      }).catch(() => {});
+    }, 2000);
+  }, [compareStart, compareEnd, compareMethod]);
 
   // 退出对比 Tab 或关闭高频模式时取消聚焦
   useEffect(() => {

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { setAuth, getAuth } from '../stores/auth';
+import { setAuthToken } from '../api';
 
 /**
  * 登录守卫：检查 Supabase 会话状态，未登录显示登录框，已登录透传 children。
@@ -33,6 +34,7 @@ export default function AuthGuard({ children }) {
       const user = session?.user ?? null;
       setAuth(user, session);
       setAuthed(!!user);
+      setAuthToken(session?.access_token || null);
     });
 
     return () => data?.subscription?.unsubscribe();

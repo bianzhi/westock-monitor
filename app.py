@@ -804,6 +804,28 @@ async def save_user_alerts(
     return {"status": "ok"}
 
 
+@app.get("/api/user/prefs")
+async def get_user_prefs(user_id: Optional[str] = Depends(get_current_user)):
+    """获取用户看板偏好（m/n 等）。"""
+    if not user_id:
+        return {"prefs": {}}
+    from supabase_user import get_user_prefs as _gp
+    return {"prefs": _gp(user_id), "user_id": user_id}
+
+
+@app.post("/api/user/prefs")
+async def save_user_prefs(
+    body: Dict[str, Any],
+    user_id: Optional[str] = Depends(get_current_user),
+):
+    """保存用户看板偏好。body: {"compare_start": 1, "compare_end": 10, ...}"""
+    if not user_id:
+        raise HTTPException(status_code=401, detail="login required")
+    from supabase_user import save_user_prefs as _sp
+    _sp(user_id, body)
+    return {"status": "ok"}
+
+
 @app.get("/api/strength/ranking", response_model=StrengthRankingResponse)
 async def get_strength_ranking(
     n: int = Query(STRENGTH_WINDOW_N),
