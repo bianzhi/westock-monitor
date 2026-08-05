@@ -50,7 +50,7 @@ def westock(*args: str, raw: bool = False, timeout: Optional[int] = None) -> Any
     try:
         result = subprocess.run(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=t,
+            universal_newlines=True, timeout=t,
         )
         if result.returncode != 0:
             err = result.stderr.strip() or result.stdout.strip()
