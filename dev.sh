@@ -95,6 +95,8 @@ if [ ! -f ".venv/.deps_installed" ] || [ "$PROJECT_DIR/requirements.txt" -nt ".v
     echo "📦 安装/更新 Python 依赖..."
     pip install --upgrade pip -q 2>/dev/null
     pip install -r requirements.txt -q
+    # supabase 为千人千面可选依赖（需 Python 3.8+），安装失败不中断
+    pip install "supabase>=2.0.0" -q 2>/dev/null || echo "   ⚠️  supabase 安装失败（需 Python 3.8+，千人千面功能不可用）"
     touch .venv/.deps_installed
 else
     echo "✅ Python 依赖已是最新"
