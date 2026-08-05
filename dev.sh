@@ -136,17 +136,11 @@ echo "🚀 启动服务..."
 LOGDIR="$PROJECT_DIR/logs"
 mkdir -p "$LOGDIR"
 
-# 后端 (FastAPI, port 8200)
-echo "   启动后端 (端口 8200)..."
+# 后端 (FastAPI, port 8200) —— 同时 serve API + 前端静态文件
+echo "   启动后端 (端口 8200，含前端)..."
 nohup python3 -m uvicorn app:app --host 0.0.0.0 --port 8200 \
     > "$LOGDIR/backend.log" 2>&1 &
 BACKEND_PID=$!
-
-# 前端 preview server（服务预编译的 dist/，无需原生编译，兼容老 OS）
-echo "   启动前端 (端口 5173)..."
-( cd "$PROJECT_DIR/frontend" && nohup npm run preview -- --host 0.0.0.0 --port 5173 \
-    > "$LOGDIR/frontend.log" 2>&1 ) &
-FRONTEND_PID=$!
 
 # 等待启动
 sleep 2
@@ -158,7 +152,7 @@ echo ""
 echo "📋 验证服务..."
 ok=true
 
-# 后端
+# 后端（含前端静态文件）
 if curl -sf http://localhost:8200/api/health > /dev/null 2>&1; then
     echo "   ✅ 后端 http://localhost:8200 (PID $BACKEND_PID)"
 else
@@ -166,11 +160,11 @@ else
     ok=false
 fi
 
-# 前端
-if curl -sf http://localhost:5173 > /dev/null 2>&1; then
-    echo "   ✅ 前端 http://localhost:5173 (PID $FRONTEND_PID)"
+# 前端（走 8200 同一端口）
+if curl -sf http://localhost:8200/ > /dev/null 2>&1; then
+    echo "   ✅ 前端 http://localhost:8200/"
 else
-    echo "   ⚠️  前端未就绪，查看 logs/frontend.log"
+    echo "   ⚠️  前端未就绪，确认 frontend/dist/ 已编译"
     ok=false
 fi
 

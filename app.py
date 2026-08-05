@@ -30,12 +30,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from config import (
     API_HOST, API_PORT, CORS_ORIGINS,
     STRENGTH_WINDOW_N, DISPLAY_DAYS, SUMMARY_3D, SUMMARY_5D,
-    SCALE_THRESHOLDS, get_scale, SCALE_TURNOVER_RATE, LOG_DIR,
+    SCALE_THRESHOLDS, get_scale, SCALE_TURNOVER_RATE, LOG_DIR, BASE_DIR,
 )
 from sectors import DEFAULT_SECTORS, get_default_sector_map
 from storage import get_storage
@@ -1053,6 +1055,23 @@ except ImportError:
 
         threading.Thread(target=_bg_init, daemon=True, name="startup_init").start()
         logger.info("app startup complete (cache loading in background)")
+
+
+# ============================================================
+# 前端静态文件（SPA 回退到 index.html）
+# ============================================================
+_FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
+if _FRONTEND_DIST.is_dir():
+    app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIST / "assets")), name="assets")
+    # SPA 回退：API 路由以外的路径 → index.html
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        index_path = _FRONTEND_DIST / "index.html"
+        if index_path.is_file():
+            return FileResponse(str(index_path))
+        raise HTTPException(status_code=404, detail="frontend not built, run: cd frontend && npm run build")
+    # mount 必须在路由之后，这里用 catch-all 替代传统 mount
+    logger.info("frontend static files mounted from %s", _FRONTEND_DIST)
 
 
 def main():
