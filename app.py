@@ -126,10 +126,6 @@ class SectorRow(BaseModel):
     today_net_flow_yi: Optional[float] = None  # 今日净流入(亿)
     today_turnover_yi: Optional[float] = None  # 今日成交额(亿)
     today_net_rate: Optional[float] = None     # 今日净额率(%)
-    yesterday_net_flow_yi: Optional[float] = None  # 昨日净流入(亿)
-    yesterday_net_rate: Optional[float] = None     # 昨日净额率(%)
-    prev2_net_flow_yi: Optional[float] = None      # 前日净流入(亿)
-    prev2_net_rate: Optional[float] = None         # 前日净额率(%)
     history: List[Dict[str, Any]] = []          # 近n日明细
     summary_3d: Optional[Dict[str, Any]] = None  # 近3日汇总
     summary_5d: Optional[Dict[str, Any]] = None  # 近5日汇总
@@ -366,14 +362,6 @@ async def get_sectors(
         # 强度判定
         strength = _calc_strength_from_records(records, circ_mv_yi, actual_n)
 
-        # 昨日/前日数据（T-1, T-2）
-        yest_rec = records[1] if len(records) > 1 else {}
-        yest_net = yest_rec.get("net_flow")
-        yest_turnover = yest_rec.get("turnover")
-        prev2_rec = records[2] if len(records) > 2 else {}
-        prev2_net = prev2_rec.get("net_flow")
-        prev2_turnover = prev2_rec.get("turnover")
-
         rows.append(SectorRow(
             code=code,
             name=sec.get("name") or meta.get("name", ""),
@@ -383,10 +371,6 @@ async def get_sectors(
             today_net_flow_yi=_to_yi(today_net),
             today_turnover_yi=_to_yi(today_turnover),
             today_net_rate=_net_rate(today_net, today_turnover),
-            yesterday_net_flow_yi=_to_yi(yest_net),
-            yesterday_net_rate=_net_rate(yest_net, yest_turnover),
-            prev2_net_flow_yi=_to_yi(prev2_net),
-            prev2_net_rate=_net_rate(prev2_net, prev2_turnover),
             history=history,
             summary_3d=summary_3d,
             summary_5d=summary_5d,

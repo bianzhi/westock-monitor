@@ -196,40 +196,6 @@ export default function App() {
       render: (_, r) => <NetRateText value={r.today_net_rate} />,
     },
     {
-      title: "昨日净流入(亿)",
-      key: "yest_net",
-      width: 150,
-      sorter: (a, b) => (a.yesterday_net_flow_yi ?? -1e18) - (b.yesterday_net_flow_yi ?? -1e18),
-      render: (_, r) => {
-        const est = r.history && r.history.length > 1 ? r.history[1]?.estimated : false;
-        return <NetFlowText value={r.yesterday_net_flow_yi} suffix={est ? " (估)" : ""} digits={3} />;
-      },
-    },
-    {
-      title: "昨日净额率",
-      key: "yest_rate",
-      width: 110,
-      sorter: (a, b) => (a.yesterday_net_rate ?? -999) - (b.yesterday_net_rate ?? -999),
-      render: (_, r) => <NetRateText value={r.yesterday_net_rate} />,
-    },
-    {
-      title: "前日净流入(亿)",
-      key: "prev2_net",
-      width: 150,
-      sorter: (a, b) => (a.prev2_net_flow_yi ?? -1e18) - (b.prev2_net_flow_yi ?? -1e18),
-      render: (_, r) => {
-        const est = r.history && r.history.length > 2 ? r.history[2]?.estimated : false;
-        return <NetFlowText value={r.prev2_net_flow_yi} suffix={est ? " (估)" : ""} digits={3} />;
-      },
-    },
-    {
-      title: "前日净额率",
-      key: "prev2_rate",
-      width: 110,
-      sorter: (a, b) => (a.prev2_net_rate ?? -999) - (b.prev2_net_rate ?? -999),
-      render: (_, r) => <NetRateText value={r.prev2_net_rate} />,
-    },
-    {
       title: "近3日净流入(亿)",
       key: "sum3_net",
       width: 160,
