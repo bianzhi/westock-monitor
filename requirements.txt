@@ -5,6 +5,7 @@ pydantic>=1.9.0,<3.0
 requests>=2.27.0
 python-dotenv>=0.19.0
 tushare>=1.2.0
+supabase>=2.0.0
 
 # 测试依赖
 pytest>=6.2.0

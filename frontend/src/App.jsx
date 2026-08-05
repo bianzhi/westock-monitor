@@ -19,6 +19,7 @@ import SectorDetail from "./SectorDetail";
 import L1Tab from "./L1Tab";
 import CompareChart from "./CompareChart";
 import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect } from "./api";
+import AuthGuard from "./components/AuthGuard";
 
 const { Header, Content, Footer } = Layout;
 
@@ -290,6 +291,7 @@ export default function App() {
   );
 
   return (
+    <AuthGuard>
     <Layout style={{ minHeight: "100vh" }}>
       <Header style={{ background: "#fff", padding: "0 24px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <Space>
@@ -517,5 +519,6 @@ export default function App() {
         最后更新: {lastUpdate || "-"}
       </Footer>
     </Layout>
+    </AuthGuard>
   );
 }

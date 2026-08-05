@@ -28,10 +28,11 @@ from typing import Any, Dict, List, Optional
 # 确保能 import 本地模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
 from config import (
@@ -101,6 +102,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ============================================================
+# Supabase 用户认证（千人千面依赖）
+# ============================================================
+security = HTTPBearer(auto_error=False)
+
+
+async def get_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> Optional[str]:
+    """从 JWT Bearer token 中提取用户 ID（无 token 返回 None，不强制登录）。"""
+    if credentials is None:
+        return None
+    try:
+        from supabase_base import create_anon_client
+        client = create_anon_client()
+        user = client.auth.get_user(credentials.credentials)
+        return user.user.id if user and user.user else None
+    except Exception:
+        return None
 
 
 # ============================================================
@@ -717,6 +739,69 @@ async def get_focus_status():
         "focused_codes": codes,
         "timestamp": datetime.now().isoformat(),
     }
+
+
+# ============================================================
+# 用户千人千面 API（自选板块 / 告警 / 偏好）
+# ============================================================
+@app.get("/api/user/watchlist")
+async def get_user_watchlist(user_id: Optional[str] = Depends(get_current_user)):
+    """获取当前用户的自选板块列表。"""
+    if not user_id:
+        return {"watchlist": [], "user_id": None}
+    from supabase_user import get_user_watchlist as _get_wl
+    codes = _get_wl(user_id)
+    return {"watchlist": codes, "user_id": user_id}
+
+
+@app.post("/api/user/watchlist")
+async def add_user_watchlist(
+    body: Dict[str, Any],
+    user_id: Optional[str] = Depends(get_current_user),
+):
+    """添加自选板块。body: {"codes": ["pt01801081", ...]}"""
+    if not user_id:
+        raise HTTPException(status_code=401, detail="login required")
+    codes = body.get("codes", [])
+    from supabase_user import add_user_watchlist as _add
+    n = _add(user_id, codes)
+    return {"status": "ok", "added": n}
+
+
+@app.delete("/api/user/watchlist")
+async def remove_user_watchlist(
+    body: Dict[str, Any],
+    user_id: Optional[str] = Depends(get_current_user),
+):
+    """删除自选板块。body: {"codes": ["pt01801081", ...]}"""
+    if not user_id:
+        raise HTTPException(status_code=401, detail="login required")
+    codes = body.get("codes", [])
+    from supabase_user import remove_user_watchlist as _rm
+    n = _rm(user_id, codes)
+    return {"status": "ok", "removed": n}
+
+
+@app.get("/api/user/alerts")
+async def get_user_alerts(user_id: Optional[str] = Depends(get_current_user)):
+    """获取用户告警阈值。"""
+    if not user_id:
+        return {"alerts": {}}
+    from supabase_user import get_user_alerts as _ga
+    return {"alerts": _ga(user_id), "user_id": user_id}
+
+
+@app.post("/api/user/alerts")
+async def save_user_alerts(
+    body: Dict[str, Any],
+    user_id: Optional[str] = Depends(get_current_user),
+):
+    """保存用户告警阈值。body: {"strength_up": 2, ...}"""
+    if not user_id:
+        raise HTTPException(status_code=401, detail="login required")
+    from supabase_user import save_user_alerts as _sa
+    _sa(user_id, body)
+    return {"status": "ok"}
 
 
 @app.get("/api/strength/ranking", response_model=StrengthRankingResponse)
