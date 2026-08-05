@@ -17,6 +17,8 @@ import { StrengthTag, NetFlowText, NetRateText, ScaleTag } from "./ui";
 import { MinuteChart, DailyHistoryChart, NetRateCompareChart } from "./Charts";
 import SectorDetail from "./SectorDetail";
 import L1Tab from "./L1Tab";
+import CompareChart from "./CompareChart";
+import { fetchMinuteCompare } from "./api";
 
 const { Header, Content, Footer } = Layout;
 
@@ -37,6 +39,25 @@ export default function App() {
   const [l1Data, setL1Data] = useState([]);
   const [l1Loading, setL1Loading] = useState(false);
   const [pageSize, setPageSize] = useState(50);
+
+  // 分时对比页
+  const [compareMethod, setCompareMethod] = useState("rank");
+  const [compareStart, setCompareStart] = useState(1);
+  const [compareEnd, setCompareEnd] = useState(10);
+  const [compareData, setCompareData] = useState(null);
+  const [compareLoading, setCompareLoading] = useState(false);
+
+  const loadCompare = useCallback(async () => {
+    setCompareLoading(true);
+    try {
+      const data = await fetchMinuteCompare(compareMethod, compareStart, compareEnd);
+      setCompareData(data);
+    } catch (e) {
+      message.error("加载分时对比失败: " + (e.response?.data?.detail || e.message));
+    } finally {
+      setCompareLoading(false);
+    }
+  }, [compareMethod, compareStart, compareEnd]);
 
   // 防抖搜索
   const handleSearchChange = useCallback((e) => {
@@ -396,6 +417,53 @@ export default function App() {
                   l1Loading={l1Loading}
                   onSwitchToSector={(s) => { setActiveTab("l2"); setSearch(s.name); setTimeout(() => loadDetail(s.code), 100); }}
                 />
+              ),
+            },
+            {
+              key: "compare",
+              label: "分时对比",
+              children: (
+                <>
+                  <Card size="small" style={{ marginBottom: 12 }}>
+                    <Space>
+                      <span>排序方式：</span>
+                      <Select
+                        value={compareMethod}
+                        onChange={(v) => { setCompareMethod(v); }}
+                        style={{ width: 160 }}
+                        options={[
+                          { value: "rank", label: "按今日净流入排名" },
+                          { value: "code", label: "按板块编号" },
+                        ]}
+                      />
+                      <span>第</span>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={compareStart}
+                        onChange={(e) => setCompareStart(Number(e.target.value) || 1)}
+                        style={{ width: 70 }}
+                      />
+                      <span>到</span>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={compareEnd}
+                        onChange={(e) => setCompareEnd(Number(e.target.value) || 1)}
+                        style={{ width: 70 }}
+                      />
+                      <span>个板块</span>
+                      <Button type="primary" icon={<ReloadOutlined />} onClick={loadCompare} loading={compareLoading}>
+                        加载
+                      </Button>
+                    </Space>
+                  </Card>
+                  <CompareChart
+                    title={`板块分时对比 (${compareMethod === "rank" ? "净流入排名" : "编号"} ${compareStart}-${compareEnd})`}
+                    series={compareData?.series || []}
+                    height={520}
+                  />
+                </>
               ),
             },
           ]}

@@ -38,4 +38,9 @@ export const triggerMinuteCollect = () =>
 export const fetchL1Summary = (n) =>
   api.get("/sectors/l1-summary", { params: { n } }).then((r) => r.data);
 
+export const fetchMinuteCompare = (method, start, end, tradeDate) =>
+  api
+    .get("/minute/compare", { params: { method, start, end, trade_date: tradeDate } })
+    .then((r) => r.data);
+
 export default api;
