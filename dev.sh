@@ -84,10 +84,32 @@ if ! command -v python3 &> /dev/null; then
     fi
 fi
 
+# 检查 Python 版本：千人千面功能需要 ≥3.8
+PYTHON_BIN="python3"
+PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+PY_MAJOR=$(echo "$PY_VER" | cut -d. -f1)
+PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
+if [ "$PY_MAJOR" -lt 3 ] || ([ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 8 ]); then
+    echo "⚠️  Python $PY_VER < 3.8，尝试安装 python38 ..."
+    if _auto_install "python38"; then
+        PYTHON_BIN="python3.8"
+        # 同时安装开发包（pip 编译依赖）
+        for mgr in dnf yum apt; do
+            command -v "$mgr" &> /dev/null && $mgr install -y python38-devel > /dev/null 2>&1 && break
+        done 2>/dev/null
+        echo "   ✅ python3.8 安装完成（千人千面可用）"
+    elif _auto_install "python3.8"; then
+        PYTHON_BIN="python3.8"
+        echo "   ✅ python3.8 安装完成（千人千面可用）"
+    else
+        echo "   ⚠️  python38 安装失败，千人千面功能不可用（不影响看板/分时对比）"
+    fi
+fi
+
 # 虚拟环境
 if [ ! -d ".venv" ]; then
     echo "📦 创建 Python 虚拟环境..."
-    python3 -m venv .venv
+    $PYTHON_BIN -m venv .venv
 fi
 source .venv/bin/activate
 
