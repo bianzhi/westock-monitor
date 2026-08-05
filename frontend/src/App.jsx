@@ -46,19 +46,37 @@ export default function App() {
     searchTimer.current = setTimeout(() => setSearch(v), 300);
   }, []);
 
-  // 拉取板块列表
+  const [warmupRetries, setWarmupRetries] = useState(0);  // 预热重试进度
+
+  // 拉取板块列表（缓存预热期自动重试，最多 5 次，间隔 3s）
   const loadSectors = useCallback(async () => {
     setLoading(true);
-    try {
-      const data = await fetchSectors(n);
-      setSectors(data.sectors || []);
-      setLastUpdate(data.last_update || "");
-      message.success(`已加载 ${data.total} 个板块`);
-    } catch (e) {
-      message.error("加载失败: " + (e.response?.data?.detail || e.message));
-    } finally {
-      setLoading(false);
+    const MAX_RETRIES = 5;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const data = await fetchSectors(n);
+        setSectors(data.sectors || []);
+        setLastUpdate(data.last_update || "");
+        setWarmupRetries(0);
+        message.success(`已加载 ${data.total} 个板块`);
+        break;
+      } catch (e) {
+        const status = e.response?.status;
+        if (status === 503 && attempt < MAX_RETRIES) {
+          // 缓存预热中，自动重试
+          setWarmupRetries(attempt + 1);
+          message.loading({
+            content: `数据预热中，${3}s 后自动重试 (${attempt + 1}/${MAX_RETRIES})...`,
+            key: "warmup",
+            duration: 3,
+          });
+          await new Promise((r) => setTimeout(r, 3000));
+          continue;
+        }
+        message.error("加载失败: " + (e.response?.data?.detail || e.message));
+      }
     }
+    setLoading(false);
   }, [n]);
 
   // 健康检查
