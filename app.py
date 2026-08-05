@@ -308,12 +308,12 @@ async def get_sectors(
         triggered = trigger_background_refresh()
         logger.info("get_sectors: force_refresh triggered=%s", triggered)
 
-    # 未就绪：尝试初始化
+    # 未就绪：不阻塞等待，直接返回 503（后台预热会自行完成）
     if not is_ready():
-        logger.warning("get_sectors: cache not ready, initializing...")
-        ok = init_cache(n=10)
-        if not ok:
-            raise HTTPException(status_code=503, detail="data cache not ready, try again")
+        raise HTTPException(
+            status_code=503,
+            detail="data cache is still warming up, please retry in a few seconds",
+        )
 
     _ensure_meta()
     storage = get_storage()

@@ -150,6 +150,8 @@ def _load_all_data(n: int = 10) -> Dict:
 def init_cache(n: int = _preload_n, blocking: bool = True) -> bool:
     """初始化/刷新缓存（阻塞调用，耗时 2-5s）。
 
+    去重：若已有 init_cache 在执行中，直接返回 ready 状态（不重复拉取）。
+
     Args:
         n: 预加载交易日数
         blocking: True 时同步加载完成再返回
@@ -158,12 +160,21 @@ def init_cache(n: int = _preload_n, blocking: bool = True) -> bool:
         True 表示加载成功
     """
     global _cache, _ready
+    # 去重：已有初始化在进行中时跳过，避免并发重复调 westock CLI
+    with _lock:
+        if _cache.get("_init_running"):
+            logger.info("data_cache: init_cache already running, skip (ready=%s)", _ready)
+            return _ready
+        _cache["_init_running"] = True
+
     logger.info("data_cache: init_cache(n=%d) starting...", n)
 
     try:
         data = _load_all_data(n)
     except Exception as e:
         logger.error("data_cache: init_cache failed: %s", e, exc_info=True)
+        with _lock:
+            _cache["_init_running"] = False
         return False
 
     with _lock:
@@ -173,6 +184,7 @@ def init_cache(n: int = _preload_n, blocking: bool = True) -> bool:
         _cache["sectors"] = data["sectors"]
         _cache["daily"] = data["daily"]
         _cache["circ_mv"] = data["circ_mv"]
+        _cache["_init_running"] = False
         _ready = True
 
     elapsed = time.time() - _load_all_data._last_t if hasattr(_load_all_data, "_last_t") else 0
