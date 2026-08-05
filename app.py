@@ -904,8 +904,9 @@ def _build_summary(
         net = r.get("net_flow")
         if net is None:
             continue
-        # 成交额：今日用自身实测值；历史日直接用"流通市值×换手率"兜底，
-        # 跳过"今日成交额"近似（开盘不久时该值远低于日均，会系统性低估历史净额率）
+        # 成交额近似优先级：
+        #   今日：自身 turnover → 流通市值×换手率 → 跳过
+        #   历史日：自身 turnover → 流通市值×换手率 → 今日成交额（无 circ_mv 时最后的兜底）
         if idx == 0:
             turnover = r.get("turnover")
             if turnover is None or turnover <= 0:
@@ -914,6 +915,9 @@ def _build_summary(
             turnover = r.get("turnover")
             if turnover is None or turnover <= 0:
                 turnover = fallback_turnover
+            # 流通市值未知（如未采集）：回退到今日成交额，避免历史记录全被丢弃
+            if (turnover is None or turnover <= 0) and subset[0].get("turnover"):
+                turnover = subset[0]["turnover"]
         if turnover is None or turnover <= 0:
             continue
         total_net += net
