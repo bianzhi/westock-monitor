@@ -612,19 +612,21 @@ def _collect_focused_snapshot(codes: List[str]) -> Dict[str, Any]:
     }
 
 
-def run_focused_loop(force: bool = False) -> None:
-    """高频聚焦采集循环。
+def run_collector_loop(force: bool = False) -> None:
+    """统一自适应采集循环。
 
-    只采 set_focused_codes 指定的板块，交易时段每 FOCUSED_INTERVAL 秒一轮。
-    遇 API 限流（返回数据不足半数）时指数退避（8s → 16s → 32s → 64s 封顶），
-    成功一轮后恢复到基础间隔。
+    聚焦模式活跃时：只采选中板块（高频 8s，带限流退避），
+    同时每 ~60s 补采一次非聚焦板块的分钟快照。
+    无聚焦模式时：全量 134 板块每 60s 一轮。
 
     Args:
         force: True 时非交易时段也跑（测试用）
     """
-    logger.info("=== focused loop started (interval=%ds, force=%s) ===",
-                FOCUSED_INTERVAL, force)
-    backoff = 0  # 连续限流次数
+    logger.info("=== collector loop started (focused=%ds, full=%ds) ===",
+                FOCUSED_INTERVAL, MINUTE_INTERVAL)
+    backoff = 0          # 连续限流次数
+    cycle = 0            # 周期计数（用于定期补采全量）
+    FULL_EVERY_N = 7     # 每 N 个聚焦周期补采一次全量（7×8s≈56s）
 
     while True:
         now = datetime.now()
@@ -633,76 +635,70 @@ def run_focused_loop(force: bool = False) -> None:
         if not trading and not force:
             time.sleep(IDLE_SLEEP)
             backoff = 0
+            cycle = 0
             continue
 
         with _focused_lock:
-            codes = list(_focused_codes)
+            focused = list(_focused_codes)
 
-        if not codes:
-            # 没有聚焦板块，休眠等待
-            time.sleep(FOCUSED_INTERVAL)
-            backoff = 0
-            continue
+        cycle += 1
 
-        try:
-            result = _collect_focused_snapshot(codes)
-            flow_ok = result["flow_coverage"] >= len(codes) * 0.5
-            if flow_ok:
-                if backoff > 0:
-                    logger.info("focused loop: recovered after %d backoffs", backoff)
-                backoff = 0
-                logger.debug("focused loop: %d codes, coverage=%d/%d, snapshots=%d",
-                             len(codes), result["flow_coverage"], len(codes),
-                             result["snapshots_written"])
-            else:
-                # API 限流：退避
+        if focused:
+            # ---- 聚焦模式：高频采选中板块 ----
+            try:
+                result = _collect_focused_snapshot(focused)
+                flow_ok = result["flow_coverage"] >= len(focused) * 0.5
+                if flow_ok:
+                    if backoff > 0:
+                        logger.info("collector: recovered after %d backoffs", backoff)
+                    backoff = 0
+                else:
+                    backoff += 1
+                    logger.warning("collector: low coverage %d/%d, backoff #%d",
+                                   result["flow_coverage"], len(focused), backoff)
+            except Exception as e:
                 backoff += 1
-                logger.warning("focused loop: low coverage %d/%d, backoff #%d",
-                               result["flow_coverage"], len(codes), backoff)
-        except Exception as e:
-            backoff += 1
-            logger.warning("focused loop error (backoff #%d): %s", backoff, e)
+                logger.warning("collector error (backoff #%d): %s", backoff, e)
 
-        # 计算休眠间隔：正常用基础间隔，限流时指数退避
-        if backoff > 0:
-            delay = min(FOCUSED_BACKOFF_BASE * (2 ** (backoff - 1)), FOCUSED_BACKOFF_MAX)
+            # 定期补采非聚焦板块的全量分钟快照
+            if cycle % FULL_EVERY_N == 0:
+                all_codes = get_sector_codes()
+                remaining = [c for c in all_codes if c not in focused]
+                if remaining:
+                    try:
+                        _collect_focused_snapshot(remaining)
+                        logger.debug("collector: full refresh %d remaining sectors", len(remaining))
+                    except Exception as e:
+                        logger.warning("collector full refresh error: %s", e)
+
+            # 休眠：正常用基础间隔，限流时指数退避
+            if backoff > 0:
+                delay = min(FOCUSED_BACKOFF_BASE * (2 ** (backoff - 1)), FOCUSED_BACKOFF_MAX)
+            else:
+                delay = FOCUSED_INTERVAL
         else:
-            delay = FOCUSED_INTERVAL
+            # ---- 无聚焦模式：全量 60s 采集 ----
+            try:
+                result = collect_minute_snapshot()
+                logger.info("collector full snapshot: %s", result)
+            except Exception as e:
+                logger.error("collector full error: %s", e, exc_info=True)
+            backoff = 0
+            cycle = 0
+            delay = MINUTE_INTERVAL
+
         time.sleep(delay)
 
 
-# ============================================================
-# 分钟级采集主循环（全量）
-# ============================================================
+# 保留旧函数名作为别名（兼容 app.py 启动代码）
+
+
+def run_focused_loop(force: bool = False) -> None:
+    run_collector_loop(force)
+
+
 def run_minute_loop(force: bool = False) -> None:
-    """分钟级采集主循环。
-
-    Args:
-        force: True 时非交易时段也跑（用于测试）
-    """
-    logger.info("=== collector minute loop started (force=%s) ===", force)
-
-    while True:
-        now = datetime.now()
-        trading = is_trading_time(now)
-
-        if not trading and not force:
-            time.sleep(IDLE_SLEEP)
-            continue
-
-        # 聚焦模式活跃时跳过全量采集，避免两个线程抢 API 带宽
-        if get_focused_codes():
-            time.sleep(FOCUSED_INTERVAL)
-            continue
-
-        try:
-            result = collect_minute_snapshot()
-            logger.info("minute snapshot: %s", result)
-        except Exception as e:
-            logger.error("minute loop error: %s", e, exc_info=True)
-
-        # 等待下一分钟
-        time.sleep(MINUTE_INTERVAL)
+    run_collector_loop(force)
 
 
 # ============================================================

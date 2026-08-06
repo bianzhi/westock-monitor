@@ -1239,15 +1239,10 @@ try:
         threading.Thread(target=_bg_init, daemon=True, name="startup_init").start()
         logger.info("app startup complete (cache loading in background)")
 
-        # 启动高频聚焦采集线程（默认不采任何板块，等待前端 focus API 激活）
-        from collector import run_focused_loop
-        threading.Thread(target=run_focused_loop, daemon=True, name="focused_loop").start()
-        logger.info("focused loop started")
-
-        # 启动全量分钟采集线程（60s 全板块，为任意板块切换提供数据基础）
-        from collector import run_minute_loop
-        threading.Thread(target=run_minute_loop, daemon=True, name="minute_loop").start()
-        logger.info("minute loop started")
+        # 启动统一自适应采集线程（聚焦 8s / 全量 60s，单一线程无竞争）
+        from collector import run_collector_loop
+        threading.Thread(target=run_collector_loop, daemon=True, name="collector").start()
+        logger.info("collector loop started")
 
         yield  # 应用运行中...
 
@@ -1292,15 +1287,10 @@ except ImportError:
         threading.Thread(target=_bg_init, daemon=True, name="startup_init").start()
         logger.info("app startup complete (cache loading in background)")
 
-        # 启动高频聚焦采集线程（默认不采任何板块，等待前端 focus API 激活）
-        from collector import run_focused_loop
-        threading.Thread(target=run_focused_loop, daemon=True, name="focused_loop").start()
-        logger.info("focused loop started")
-
-        # 启动全量分钟采集线程（60s 全板块，为任意板块切换提供数据基础）
-        from collector import run_minute_loop
-        threading.Thread(target=run_minute_loop, daemon=True, name="minute_loop").start()
-        logger.info("minute loop started")
+        # 启动统一自适应采集线程（聚焦 8s / 全量 60s，单一线程无竞争）
+        from collector import run_collector_loop
+        threading.Thread(target=run_collector_loop, daemon=True, name="collector").start()
+        logger.info("collector loop started")
 
 
 # ============================================================
