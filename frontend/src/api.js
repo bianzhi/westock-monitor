@@ -5,8 +5,8 @@ const api = axios.create({
   timeout: 90000,
 });
 
-export const fetchSectors = (n) =>
-  api.get("/sectors", { params: { n } }).then((r) => r.data);
+export const fetchSectors = (n, forceRefresh = false) =>
+  api.get("/sectors", { params: { n, force_refresh: forceRefresh } }).then((r) => r.data);
 
 export const fetchSectorDetail = (code, n) =>
   api.get(`/sectors/${code}`, { params: { n } }).then((r) => r.data);

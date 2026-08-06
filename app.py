@@ -320,17 +320,19 @@ async def get_sectors(
     """板块列表 + 当前强度（宽表主数据）。
 
     数据来源：启动时预加载的 data_cache（10 交易日），<5ms 响应。
-    force_refresh=True 时触发后台异步刷新（非阻塞），立即返回当前缓存数据。
-    调用方可通过 /api/health 的 cache_refreshing 字段轮询进度。
+    force_refresh=True 时同步拉取最新数据（阻塞 2-5s），然后返回最新结果。
 
     Args:
         n: 强度判定窗口天数（须 ≤ 缓存窗口，否则用缓存窗口）
-        force_refresh: True 时触发后台刷新（不阻塞本次响应）
+        force_refresh: True 时同步刷新缓存再返回（数据与腾讯自选股实时对齐）
     """
-    # 强制刷新：后台异步触发，立即返回当前缓存
+    # 强制刷新：同步等待缓存刷新完成再返回
     if force_refresh:
-        triggered = trigger_background_refresh()
-        logger.info("get_sectors: force_refresh triggered=%s", triggered)
+        logger.info("get_sectors: force_refresh — sync refresh...")
+        ok = refresh_cache()
+        if not ok:
+            raise HTTPException(status_code=503, detail="cache refresh failed")
+        logger.info("get_sectors: force_refresh done")
 
     # 未就绪：不阻塞等待，直接返回 503（后台预热会自行完成）
     if not is_ready():

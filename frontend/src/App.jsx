@@ -108,12 +108,12 @@ export default function App() {
   const [warmupRetries, setWarmupRetries] = useState(0);  // 预热重试进度
 
   // 拉取板块列表（缓存预热期指数退避重试，最多 20 次，总时长 ~3 分钟）
-  const loadSectors = useCallback(async () => {
+  const loadSectors = useCallback(async (forceRefresh = false) => {
     setLoading(true);
-    const MAX_RETRIES = 20;
+    const MAX_RETRIES = forceRefresh ? 1 : 20;  // 强制刷新时只试 1 次（后端同步等待）
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const data = await fetchSectors(n);
+        const data = await fetchSectors(n, forceRefresh);
         setSectors(data.sectors || []);
         setLastUpdate(data.last_update || "");
         setWarmupRetries(0);
@@ -121,7 +121,7 @@ export default function App() {
         break;
       } catch (e) {
         const status = e.response?.status;
-        if (status === 503 && attempt < MAX_RETRIES) {
+        if (status === 503 && attempt < MAX_RETRIES && !forceRefresh) {
           setWarmupRetries(attempt + 1);
           // 指数退避：3s → 6s → 12s → 24s → 48s → 60s（封顶）
           const delay = Math.min(3000 * Math.pow(2, attempt), 60000);
@@ -334,7 +334,7 @@ export default function App() {
               { value: 20, label: "n=20" },
             ]}
           />
-          <Button icon={<ReloadOutlined />} onClick={loadSectors} loading={loading}>
+          <Button icon={<ReloadOutlined />} onClick={() => loadSectors(true)} loading={loading}>
             刷新
           </Button>
           <Button
