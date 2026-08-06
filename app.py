@@ -22,6 +22,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -67,6 +68,11 @@ from data_cache import (
 _sectors_cache: Dict[str, Any] = {}
 _cache_lock = threading.Lock()
 CACHE_TTL_SEC = 15  # 15s 内重复请求直接返回缓存
+
+# 概念板块独立缓存（避免与二级板块主缓存冲突）
+_concept_cache: Dict[str, Any] = {}
+_concept_cache_lock = threading.Lock()
+CONCEPT_CACHE_TTL_SEC = 15  # 15s 内重复请求直接返回缓存，避免每次切 tab 都同步阻塞调 CLI
 
 # ============================================================
 # 日志配置
@@ -418,57 +424,99 @@ async def get_concept_sectors(
     n: int = Query(STRENGTH_WINDOW_N, description="强度判定窗口"),
     force_refresh: bool = Query(False, description="是否强制刷新"),
 ):
-    """概念板块列表 + 当前强度（实时调 westock CLI，不依赖缓存）。"""
+    """概念板块列表 + 当前强度（实时调 westock CLI，15s 内存缓存）。
+
+    与二级板块不同，概念板块不进 data_cache（量小、变动快），每次请求实时拉
+    fund flow。但为避免切 tab 触发的雪崩式 CLI 调用，加 15s 内存缓存。
+    预热期返回 503 让前端重试；CLI 异常兜底返回 503 而非 500。
+    """
+    # 预热期：返回 503 让前端重试（与 /api/sectors 行为一致）
+    if not is_ready():
+        raise HTTPException(status_code=503, detail="data cache is still warming up, please retry in a few seconds")
+
+    cache_key = f"concept_{n}"
+    now = time.time()
+
+    # 非强制刷新：命中缓存直接返回
+    if not force_refresh:
+        with _concept_cache_lock:
+            entry = _concept_cache.get(cache_key)
+            if entry and (now - entry["ts"]) < CONCEPT_CACHE_TTL_SEC:
+                logger.debug("get_concept_sectors: cache hit (age=%.1fs)", now - entry["ts"])
+                return entry["data"]
+
     from concept_sectors import get_default_codes, get_default_name
+    from westock import fund_flow, extract_main_net_flow
+
     codes = get_default_codes()
     if not codes:
-        return SectorListResponse(date=date.today().isoformat(), last_update="", n_window=n, sectors=[], total=0)
+        empty_resp = SectorListResponse(
+            date=date.today().isoformat(), last_update="",
+            n_window=n, sectors=[], total=0,
+        )
+        return empty_resp
 
-    # 实时拉概念板块 fund flow（不做缓存，数据量小）
-    from westock import fund_flow, extract_main_net_flow
-    def _sf(v):
-        if v is None or v == "": return None
-        try: return float(v)
-        except (TypeError, ValueError): return None
-    flow_records = fund_flow(codes, raw=True)
-    flow_map: dict = {}
-    for r in flow_records:
-        c = r.get("code") or r.get("SecuCode")
-        if c:
-            flow_map[c] = r
+    # 实时拉概念板块 fund flow，整体兜底
+    try:
+        def _sf(v):
+            if v is None or v == "": return None
+            try: return float(v)
+            except (TypeError, ValueError): return None
 
-    rows = []
-    today_str = date.today().isoformat()
-    for code in codes:
-        flow = flow_map.get(code, {})
-        metrics = calc_sector_metrics(flow, TURNOVER_METHOD) if flow else {}
-        today_net = extract_main_net_flow(flow)
-        today_turnover = metrics.get("turnover")
-        net_5d = _sf(flow.get("MainNetFlow5D"))
-        net_10d = _sf(flow.get("MainNetFlow10D"))
-        net_20d = _sf(flow.get("MainNetFlow20D"))
+        flow_records = fund_flow(codes, raw=True)
+        flow_map: dict = {}
+        for r in flow_records:
+            c = r.get("code") or r.get("SecuCode")
+            if c:
+                flow_map[c] = r
 
-        # 构建 minimal daily records 用于强度计算
-        records = [{"date": today_str, "net_flow": today_net, "turnover": today_turnover,
-                     "main_net_flow_5d": net_5d, "main_net_flow_10d": net_10d,
-                     "main_net_flow_20d": net_20d}]
-        summary_3d = _build_summary(records, SUMMARY_3D, None)
-        summary_5d = _build_summary(records, SUMMARY_5D, None)
-        strength = _calc_strength_from_records(records, None, n)
+        rows = []
+        today_str = date.today().isoformat()
+        for code in codes:
+            flow = flow_map.get(code, {})
+            metrics = calc_sector_metrics(flow, TURNOVER_METHOD) if flow else {}
+            today_net = extract_main_net_flow(flow)
+            today_turnover = metrics.get("turnover")
+            net_5d = _sf(flow.get("MainNetFlow5D"))
+            net_10d = _sf(flow.get("MainNetFlow10D"))
+            net_20d = _sf(flow.get("MainNetFlow20D"))
 
-        rows.append(SectorRow(
-            code=code, name=flow.get("name") or get_default_name(code),
-            l1="概念", circ_mv_yi=None, scale="小盘",
-            today_net_flow_yi=_to_yi(today_net),
-            today_turnover_yi=_to_yi(today_turnover),
-            today_net_rate=_net_rate(today_net, today_turnover),
-            history=[], summary_3d=summary_3d, summary_5d=summary_5d,
-            strength_value=strength["value"], strength_level=strength["level"],
-        ))
+            # 构建 minimal daily records 用于强度计算
+            records = [{"date": today_str, "net_flow": today_net, "turnover": today_turnover,
+                         "main_net_flow_5d": net_5d, "main_net_flow_10d": net_10d,
+                         "main_net_flow_20d": net_20d}]
+            summary_3d = _build_summary(records, SUMMARY_3D, None)
+            summary_5d = _build_summary(records, SUMMARY_5D, None)
+            strength = _calc_strength_from_records(records, None, n)
 
-    rows.sort(key=lambda r: r.strength_value, reverse=True)
-    return SectorListResponse(date=today_str, last_update=datetime.now().isoformat(),
-                               n_window=n, sectors=rows, total=len(rows))
+            rows.append(SectorRow(
+                code=code, name=flow.get("name") or get_default_name(code),
+                l1="概念", circ_mv_yi=None, scale="小盘",
+                today_net_flow_yi=_to_yi(today_net),
+                today_turnover_yi=_to_yi(today_turnover),
+                today_net_rate=_net_rate(today_net, today_turnover),
+                history=[], summary_3d=summary_3d, summary_5d=summary_5d,
+                strength_value=strength["value"], strength_level=strength["level"],
+            ))
+
+        rows.sort(key=lambda r: r.strength_value, reverse=True)
+        resp = SectorListResponse(
+            date=today_str, last_update=datetime.now().isoformat(),
+            n_window=n, sectors=rows, total=len(rows),
+        )
+
+        # 写入缓存
+        with _concept_cache_lock:
+            _concept_cache[cache_key] = {"ts": now, "data": resp}
+
+        return resp
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("get_concept_sectors failed: %s", e)
+        # CLI 异常返回 503 让前端重试，而非 500 直接失败
+        raise HTTPException(status_code=503, detail=f"concept fund flow failed: {e}")
 
 
 @app.get("/api/sectors/l1-summary", response_model=L1SummaryResponse)
