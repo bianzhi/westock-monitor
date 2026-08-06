@@ -425,7 +425,8 @@ async def get_concept_sectors(
         return SectorListResponse(date=date.today().isoformat(), last_update="", n_window=n, sectors=[], total=0)
 
     # 实时拉概念板块 fund flow（不做缓存，数据量小）
-    from westock import fund_flow
+    from westock import fund_flow, extract_main_net_flow
+    from collector import _safe_float
     flow_records = fund_flow(codes, raw=True)
     flow_map: dict = {}
     for r in flow_records:
