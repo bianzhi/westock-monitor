@@ -685,6 +685,7 @@ async def get_minute_compare(
                     hhmm = ts[11:16] if len(ts) >= 16 else ""
             points.append({
                 "time": hhmm,
+                "timestamp": ts,                               # ISO 时间戳（前端 time 轴用）
                 "main_net_flow": d.get("main_net_flow"),      # 当日累计(元)
                 "minute_delta": d.get("minute_delta"),         # 本分钟增量(元)
                 "turnover": d.get("turnover"),
