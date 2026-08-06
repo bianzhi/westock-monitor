@@ -47,7 +47,10 @@ export default function AuthGuard({ children }) {
     try {
       const { error } = await supabase.auth.signInWithOtp({
         email,
-        options: { shouldCreateUser: true },
+        options: {
+          shouldCreateUser: true,
+          emailRedirectTo: window.location.origin + '/',
+        },
       });
       if (error) setMsg(error.message);
       else setMsg('已发送登录链接到邮箱，请查收并点击链接登录。');

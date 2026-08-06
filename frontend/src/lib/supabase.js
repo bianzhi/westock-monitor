@@ -17,6 +17,7 @@ function getSupabase() {
     auth: {
       autoRefreshToken: true,
       persistSession: true,
+      detectSessionInUrl: true,
       storageKey: 'westock-web-auth',
     },
   });
