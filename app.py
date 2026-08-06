@@ -668,6 +668,13 @@ async def get_minute_compare(
     # 选取区间 [start-1, end-1]
     selected = ordered_codes[start - 1:end]
 
+    # 先触发一次即时分钟采集，确保数据与板块页实时对齐
+    from collector import _collect_focused_snapshot
+    try:
+        _collect_focused_snapshot(selected)
+    except Exception:
+        pass  # 采集失败不影响后续读取
+
     # 批量拿分钟数据
     deltas_map = storage.get_minute_deltas_batch(selected, trade_date)
 
