@@ -426,14 +426,12 @@ async def get_concept_sectors(
 ):
     """概念板块列表 + 当前强度（实时调 westock CLI，15s 内存缓存）。
 
-    与二级板块不同，概念板块不进 data_cache（量小、变动快），每次请求实时拉
-    fund flow。但为避免切 tab 触发的雪崩式 CLI 调用，加 15s 内存缓存。
-    预热期返回 503 让前端重试；CLI 异常兜底返回 503 而非 500。
+    与二级板块不同，概念板块不依赖 data_cache（量小、变动快、与二级板块
+    代码空间隔离），每次请求实时拉 fund flow。因此**不检查 is_ready()**——
+    即便二级板块缓存还在预热，概念板块只要 CLI 可用就能返回数据。
+    为避免切 tab 触发的雪崩式 CLI 调用，加 15s 内存缓存；CLI 异常兜底
+    返回 503 让前端重试。
     """
-    # 预热期：返回 503 让前端重试（与 /api/sectors 行为一致）
-    if not is_ready():
-        raise HTTPException(status_code=503, detail="data cache is still warming up, please retry in a few seconds")
-
     cache_key = f"concept_{n}"
     now = time.time()
 
