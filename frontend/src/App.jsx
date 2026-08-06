@@ -39,6 +39,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("l2");
   const [l1Data, setL1Data] = useState([]);
   const [l1Loading, setL1Loading] = useState(false);
+  const l1LoadedN = useRef(null);  // 记录上次加载的 n 值，避免重复请求
   const [pageSize, setPageSize] = useState(50);
 
   // 分时对比页
@@ -188,16 +189,19 @@ export default function App() {
 
   // 加载一级行业聚合数据
   const loadL1Summary = useCallback(async () => {
+    // 已缓存且 n 没变 → 跳过（切 Tab 不重复请求）
+    if (l1Data.length > 0 && l1LoadedN.current === n) return;
     setL1Loading(true);
     try {
       const data = await fetchL1Summary(n);
       setL1Data(data.l1_summaries || []);
+      l1LoadedN.current = n;
     } catch (e) {
       message.error("一级行业加载失败: " + (e.response?.data?.detail || e.message));
     } finally {
       setL1Loading(false);
     }
-  }, [n]);
+  }, [n, l1Data.length]);
 
   // Tab 切换时加载对应数据
   useEffect(() => {

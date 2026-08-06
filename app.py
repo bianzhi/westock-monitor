@@ -417,86 +417,73 @@ async def get_sectors(
 async def get_l1_summary(
     n: int = Query(STRENGTH_WINDOW_N, description="强度判定窗口"),
 ):
-    """一级行业聚合视图：31 个一级行业 × 汇总资金流 + 强度分布。
+    """一级行业聚合视图（直接从缓存读取，不调用 get_sectors）。"""
+    if not is_ready():
+        raise HTTPException(status_code=503, detail="cache warming up")
 
-    对 /api/sectors 的 134 个二级板块按 l1 字段分组，
-    汇总总净流入/总成交额/聚合净额率/各档分布/最强 3 个二级板块。
-    """
-    sectors_resp = await get_sectors(n=n)
-    rows = sectors_resp.sectors
+    _ensure_meta()
+    sector_list = cache_get_sectors()
+    daily_map = get_daily_map()
+    circ_mv_map = get_circ_mv_map()
 
-    # 按 l1 分组
+    # 按 l1 分组，聚合 today_net / today_turnover / strength
     from collections import OrderedDict
-    groups: Dict[str, List[SectorRow]] = OrderedDict()
-    for r in rows:
-        l1 = r.l1 or "其他"
-        groups.setdefault(l1, []).append(r)
+    groups: Dict[str, list] = OrderedDict()
+    for sec in sector_list:
+        code = sec["code"]
+        l1 = sec.get("l1") or "其他"
+        records = daily_map.get(code, [])
+        today_rec = records[0] if records else {}
+        today_net = today_rec.get("net_flow")
+        today_turnover = today_rec.get("turnover")
+        circ_mv_yi = circ_mv_map.get(code)
+        scale = get_scale(circ_mv_yi) if circ_mv_yi else "小盘"
+        strength = _calc_strength_from_records(records, circ_mv_yi, n)
+        groups.setdefault(l1, []).append({
+            "code": code,
+            "name": sec.get("name", ""),
+            "today_net": today_net,
+            "today_turnover": today_turnover,
+            "net_rate": _net_rate(today_net, today_turnover),
+            "circ_mv_yi": circ_mv_yi,
+            "strength_value": strength["value"],
+            "strength_level": strength["level"],
+        })
 
     summaries = []
     for l1_name, group_rows in groups.items():
         count = len(group_rows)
+        valid_net = [r for r in group_rows if r["today_net"] is not None]
+        total_net = sum(r["today_net"] for r in valid_net) if valid_net else None
+        valid_to = [r for r in group_rows if r["today_turnover"] is not None]
+        total_turnover = sum(r["today_turnover"] for r in valid_to) if valid_to else None
+        total_mv = sum(r["circ_mv_yi"] for r in group_rows if r["circ_mv_yi"]) or None
+        net_rate = _net_rate(total_net, total_turnover) if total_net and total_turnover else None
 
-        # 汇总金额（排除 None）
-        valid_turnover = [r for r in group_rows if r.today_turnover_yi is not None]
-        total_turnover = sum(r.today_turnover_yi for r in valid_turnover) if valid_turnover else None
-
-        valid_net = [r for r in group_rows if r.today_net_flow_yi is not None]
-        total_net = sum(r.today_net_flow_yi for r in valid_net) if valid_net else None
-
-        valid_mv = [r for r in group_rows if r.circ_mv_yi is not None]
-        total_mv = sum(r.circ_mv_yi for r in valid_mv) if valid_mv else None
-
-        # 聚合净额率
-        net_rate = None
-        if total_net is not None and total_turnover is not None and total_turnover > 0:
-            net_rate = round(total_net / total_turnover * 100, 4)
-
-        # 平均强度值
-        avg_strength = sum(r.strength_value for r in group_rows) / count if count > 0 else 0
-
-        # 强度分布
+        avg_strength = sum(r["strength_value"] for r in group_rows) / count if count else 0
         dist = {"强": 0, "偏强": 0, "普通": 0, "偏弱": 0, "弱": 0}
         for r in group_rows:
-            lv = r.strength_level
+            lv = r["strength_level"]
             if lv in dist:
                 dist[lv] += 1
-
-        # 最强 3 个二级板块
-        sorted_group = sorted(group_rows, key=lambda x: x.strength_value, reverse=True)
-        top3 = [
-            {
-                "code": s.code,
-                "name": s.name,
-                "net_rate": s.today_net_rate,
-                "strength_level": s.strength_level,
-                "strength_value": s.strength_value,
-            }
-            for s in sorted_group[:3]
-        ]
+        sorted_group = sorted(group_rows, key=lambda x: x["strength_value"], reverse=True)
+        top3 = [{"code": s["code"], "name": s["name"], "net_rate": s["net_rate"],
+                 "strength_level": s["strength_level"], "strength_value": s["strength_value"]}
+                for s in sorted_group[:3]]
 
         summaries.append(L1SummaryRow(
-            l1_name=l1_name,
-            sector_count=count,
-            total_circ_mv_yi=total_mv,
-            total_net_flow_yi=total_net,
-            total_turnover_yi=total_turnover,
-            net_rate=net_rate,
-            avg_strength_value=round(avg_strength, 3),
-            strength_distribution=dist,
-            strong_count=dist.get("强", 0),
-            weak_count=dist.get("弱", 0),
+            l1_name=l1_name, sector_count=count,
+            total_circ_mv_yi=total_mv, total_net_flow_yi=_to_yi(total_net),
+            total_turnover_yi=_to_yi(total_turnover), net_rate=net_rate,
+            avg_strength_value=round(avg_strength, 3), strength_distribution=dist,
+            strong_count=dist.get("强", 0), weak_count=dist.get("弱", 0),
             top_sectors=top3,
         ))
 
-    # 按平均强度降序
     summaries.sort(key=lambda s: s.avg_strength_value, reverse=True)
-
     return L1SummaryResponse(
-        date=sectors_resp.date,
-        last_update=sectors_resp.last_update,
-        n_window=n,
-        l1_summaries=summaries,
-        total_l1=len(summaries),
+        date=date.today().isoformat(), last_update=datetime.now().isoformat(),
+        n_window=n, l1_summaries=summaries, total_l1=len(summaries),
     )
 
 
