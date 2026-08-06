@@ -45,6 +45,7 @@ export default function App() {
   const [compareMethod, setCompareMethod] = useState("rank");
   const [compareStart, setCompareStart] = useState(1);
   const [compareEnd, setCompareEnd] = useState(10);
+  const [compareMode, setCompareMode] = useState("minute");  // minute / cumulative
   const [compareData, setCompareData] = useState(null);
   const [compareLoading, setCompareLoading] = useState(false);
 
@@ -492,6 +493,15 @@ export default function App() {
                         style={{ width: 70 }}
                       />
                       <span>个板块</span>
+                      <Select
+                        value={compareMode}
+                        onChange={setCompareMode}
+                        style={{ width: 80 }}
+                        options={[
+                          { value: "minute", label: "每分钟" },
+                          { value: "cumulative", label: "累计" },
+                        ]}
+                      />
                       <Button type="primary" icon={<ReloadOutlined />} onClick={loadCompare} loading={compareLoading}>
                         加载
                       </Button>
@@ -531,6 +541,7 @@ export default function App() {
                   </Card>
                   <CompareChart
                     title={`板块分时对比 (${compareMethod === "rank" ? "净流入排名" : "编号"} ${compareStart}-${compareEnd})`}
+                    mode={compareMode}
                     series={compareData?.series || []}
                     height={520}
                   />

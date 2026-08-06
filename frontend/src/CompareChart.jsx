@@ -12,11 +12,12 @@ const COLORS = [
 /**
  * 多板块分时对比图
  * props:
- *   series = [{ code, name, rank, points: [{time, minute_delta}, ...] }, ...]
+ *   series = [{ code, name, rank, points: [{time, timestamp, minute_delta, main_net_flow, is_open_anchor}, ...] }, ...]
+ *   mode = "minute" | "cumulative"  — 每分钟净流入 / 当日累计净流入
  *   title = 标题
  *   height = 图表高度
  */
-export default function CompareChart({ series = [], title = "板块分时对比", height = 480 }) {
+export default function CompareChart({ series = [], mode = "minute", title = "板块分时对比", height = 480 }) {
   const option = useMemo(() => {
     if (!series.length) {
       return {
@@ -25,7 +26,7 @@ export default function CompareChart({ series = [], title = "板块分时对比"
       };
     }
 
-    // 取第一个板块的时间轴（使用 ISO timestamp，ECharts time 轴自动按实际时间间距渲染）
+    const isCumulative = mode === "cumulative";
 
     return {
       title: {
@@ -62,20 +63,20 @@ export default function CompareChart({ series = [], title = "板块分时对比"
       grid: { left: 50, right: 30, top: 80, bottom: 40 },
       xAxis: {
         type: "time",
-        minInterval: 60000,  // 1 分钟最小刻度
+        minInterval: 60000,
         axisLabel: {
           rotate: 45,
           fontSize: 10,
           formatter: (value) => {
             const d = new Date(value);
-            return d.toTimeString().slice(0, 5);  // HH:MM
+            return d.toTimeString().slice(0, 5);
           },
         },
         splitLine: { show: false },
       },
       yAxis: {
         type: "value",
-        name: "本分钟净流入(亿)",
+        name: isCumulative ? "当日累计净流入(亿)" : "本分钟净流入(亿)",
         splitLine: { lineStyle: { type: "dashed", color: "#e0e0e0" } },
       },
       series: series.map((s, idx) => ({
@@ -85,14 +86,22 @@ export default function CompareChart({ series = [], title = "板块分时对比"
         symbol: "none",
         lineStyle: { width: 2, color: COLORS[idx % COLORS.length] },
         itemStyle: { color: COLORS[idx % COLORS.length] },
+        connectNulls: isCumulative,  // 累计模式连接 null 点，画连续折线
         data: (s.points || []).map((p) => {
+          if (isCumulative) {
+            // 累计模式：使用 main_net_flow，跳过空值
+            if (p.main_net_flow == null) return null;
+            const ts = new Date(p.timestamp).getTime();
+            return [ts, Number(p.main_net_flow) / 1e8];
+          }
+          // 分钟模式：跳过开盘锚点和空值
           if (p.is_open_anchor || p.minute_delta == null) return null;
           const ts = new Date(p.timestamp).getTime();
           return [ts, Number(p.minute_delta) / 1e8];
         }),
       })),
     };
-  }, [series, title]);
+  }, [series, mode, title]);
 
   return <ReactECharts option={option} style={{ height }} />;
 }
