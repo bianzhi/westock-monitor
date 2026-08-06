@@ -690,6 +690,11 @@ def run_minute_loop(force: bool = False) -> None:
             time.sleep(IDLE_SLEEP)
             continue
 
+        # 聚焦模式活跃时跳过全量采集，避免两个线程抢 API 带宽
+        if get_focused_codes():
+            time.sleep(FOCUSED_INTERVAL)
+            continue
+
         try:
             result = collect_minute_snapshot()
             logger.info("minute snapshot: %s", result)
