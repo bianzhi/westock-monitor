@@ -495,6 +495,9 @@ export default function App() {
                       <Button type="primary" icon={<ReloadOutlined />} onClick={loadCompare} loading={compareLoading}>
                         加载
                       </Button>
+                      <Button icon={<ReloadOutlined />} onClick={() => loadCompare()} loading={compareLoading}>
+                        刷新
+                      </Button>
                       <span>|</span>
                       <Switch
                         checked={focusEnabled}
