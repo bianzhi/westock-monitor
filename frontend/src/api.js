@@ -41,9 +41,9 @@ export const fetchL1Summary = (n) =>
 export const fetchConceptSectors = (n) =>
   api.get("/sectors/concept", { params: { n } }).then((r) => r.data);
 
-export const fetchMinuteCompare = (method, start, end, tradeDate) =>
+export const fetchMinuteCompare = (method, start, end, source, codes, tradeDate) =>
   api
-    .get("/minute/compare", { params: { method, start, end, trade_date: tradeDate } })
+    .get("/minute/compare", { params: { method, start, end, source, codes, trade_date: tradeDate } })
     .then((r) => r.data);
 
 export const focusMinuteCollect = (codes) =>

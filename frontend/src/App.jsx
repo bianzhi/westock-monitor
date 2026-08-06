@@ -63,6 +63,8 @@ export default function App() {
   const [compareStart, setCompareStart] = useState(1);
   const [compareEnd, setCompareEnd] = useState(10);
   const [compareMode, setCompareMode] = useState("minute");  // minute / cumulative
+  const [compareSource, setCompareSource] = useState("l2");  // l2 / concept
+  const [manualCodes, setManualCodes] = useState("");  // 手动输入板块代码
   const [compareData, setCompareData] = useState(null);
   const [compareLoading, setCompareLoading] = useState(false);
 
@@ -105,15 +107,16 @@ export default function App() {
 
   const loadCompare = useCallback(async () => {
     setCompareLoading(true);
+    const method = manualCodes.trim() ? "manual" : compareMethod;
     try {
-      const data = await fetchMinuteCompare(compareMethod, compareStart, compareEnd);
+      const data = await fetchMinuteCompare(method, compareStart, compareEnd, compareSource, manualCodes.trim() || undefined);
       setCompareData(data);
     } catch (e) {
       message.error("加载分时对比失败: " + (e.response?.data?.detail || e.message));
     } finally {
       setCompareLoading(false);
     }
-  }, [compareMethod, compareStart, compareEnd]);
+  }, [compareMethod, compareStart, compareEnd, compareSource, manualCodes]);
 
   // 防抖搜索
   const handleSearchChange = useCallback((e) => {
@@ -498,6 +501,23 @@ export default function App() {
                           { value: "rank", label: "按今日净流入排名" },
                           { value: "code", label: "按板块编号" },
                         ]}
+                        disabled={!!manualCodes.trim()}
+                      />
+                      <Select
+                        value={compareSource}
+                        onChange={setCompareSource}
+                        style={{ width: 110 }}
+                        options={[
+                          { value: "l2", label: "二级板块" },
+                          { value: "concept", label: "概念板块" },
+                        ]}
+                      />
+                      <Input
+                        placeholder="或输入代码（逗号分隔，如 pt01,pt02）"
+                        value={manualCodes}
+                        onChange={(e) => setManualCodes(e.target.value)}
+                        style={{ width: 260 }}
+                        allowClear
                       />
                       <span>第</span>
                       <Input

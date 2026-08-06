@@ -660,54 +660,55 @@ async def get_realtime_minute(
 
 @app.get("/api/minute/compare")
 async def get_minute_compare(
-    method: str = Query("rank", description="排序方式: rank=按今日净流入排名 / code=按板块编号"),
+    method: str = Query("rank", description="排序方式: rank=按今日净流入排名 / code=按板块编号 / manual=手动指定"),
     start: int = Query(1, ge=1, description="起始序号（1-based）"),
     end: int = Query(10, ge=1, description="结束序号（含）"),
+    source: str = Query("l2", description="板块来源: l2=二级板块 / concept=概念板块"),
+    codes: Optional[str] = Query(None, description="手动指定板块代码，逗号分隔（method=manual 时使用）"),
     trade_date: Optional[str] = Query(None, description="YYYYMMDD，默认今日"),
 ):
     """多板块分时对比图数据。
 
     Args:
-        method: rank(按今日净流入倒序取区间) / code(按板块编号顺序取区间)
-        start: 起始序号（1-based，含）
-        end: 结束序号（含）
+        method: rank(按今日净流入倒序取区间) / code(按板块编号顺序取区间) / manual(手动指定 codes)
+        start/end: 区间序号
+        source: l2 或 concept
+        codes: 手动指定板块代码，逗号分隔
         trade_date: 交易日期
-
-    Returns:
-        {
-          "trade_date": str,
-          "series": [
-            {"code": str, "name": str, "rank": int, "points": [{time, main_net_flow, minute_delta}, ...]},
-            ...
-          ]
-        }
     """
     storage = get_storage()
     if trade_date is None:
         trade_date = date.today().strftime("%Y%m%d")
 
-    # 获取全板块代码列表
-    from sectors import get_default_sector_map
-    sector_map = get_default_sector_map()
-    all_codes = get_sector_codes()
+    # 获取板块代码列表和名称映射
+    if source == "concept":
+        from concept_sectors import get_default_codes, get_concept_sectors
+        all_codes = get_default_codes()
+        sector_map = {c: {"name": n} for c, n in get_concept_sectors().items()}
+    else:
+        from sectors import get_default_sector_map
+        sector_map = get_default_sector_map()
+        all_codes = get_sector_codes()
 
-    # 排序
-    if method == "rank":
-        # 按今日净流入倒序
-        daily_map = get_daily_map()
-        ranked = []
-        for code in all_codes:
-            records = daily_map.get(code, [])
-            today_net = records[0].get("net_flow") if records else None
-            ranked.append((code, today_net or 0))
+    # 手动指定模式
+    if method == "manual" and codes:
+        selected = [c.strip() for c in codes.split(",") if c.strip()]
+    elif method == "rank":
+        # 按今日净流入倒序 — 概念板块需要实时 fund_flow
+        if source == "concept":
+            from westock import fund_flow
+            flow_records = fund_flow(all_codes, raw=True)
+            flow_map = {r.get("code") or r.get("SecuCode"): r for r in flow_records if r}
+            ranked = [(c, _safe_float(flow_map.get(c, {}).get("MainNetFlow")) or 0) for c in all_codes]
+        else:
+            daily_map = get_daily_map()
+            ranked = [(c, (daily_map.get(c, [{}])[0].get("net_flow") or 0)) for c in all_codes]
         ranked.sort(key=lambda x: x[1], reverse=True)
         ordered_codes = [c for c, _ in ranked]
+        selected = ordered_codes[start - 1:end]
     else:
-        # 按板块编号排序
         ordered_codes = sorted(all_codes)
-
-    # 选取区间 [start-1, end-1]
-    selected = ordered_codes[start - 1:end]
+        selected = ordered_codes[start - 1:end]
 
     # 批量拿分钟数据（采集由后台统一线程负责，API 只读不写）
     deltas_map = storage.get_minute_deltas_batch(selected, trade_date)
