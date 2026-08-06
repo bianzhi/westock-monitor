@@ -52,7 +52,7 @@ from strength import (
     calc_strength, calc_aggregate_net_rate, calc_aggregate_net_flow,
     calc_sector_strength, level_to_color,
 )
-from westock_fund_metrics import calc_sector_metrics_batch, calc_turnover
+from westock_fund_metrics import calc_sector_metrics_batch, calc_turnover, calc_sector_metrics
 from data_cache import (
     init_cache, is_ready, refresh_cache, get_max_n,
     get_codes as cache_get_codes, get_sectors as cache_get_sectors,
