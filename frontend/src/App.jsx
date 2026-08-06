@@ -18,7 +18,7 @@ import { MinuteChart, DailyHistoryChart, NetRateCompareChart } from "./Charts";
 import SectorDetail from "./SectorDetail";
 import L1Tab from "./L1Tab";
 import CompareChart from "./CompareChart";
-import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect, fetchUserPrefs, saveUserPrefs } from "./api";
+import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect, fetchUserPrefs, saveUserPrefs, fetchConceptSectors } from "./api";
 import AuthGuard from "./components/AuthGuard";
 
 const { Header, Content, Footer } = Layout;
@@ -41,6 +41,22 @@ export default function App() {
   const [l1Loading, setL1Loading] = useState(false);
   const l1LoadedN = useRef(null);  // 记录上次加载的 n 值，避免重复请求
   const [pageSize, setPageSize] = useState(50);
+
+  // 概念板块
+  const [conceptSectors, setConceptSectors] = useState([]);
+  const [conceptLoading, setConceptLoading] = useState(false);
+
+  const loadConceptSectors = useCallback(async () => {
+    setConceptLoading(true);
+    try {
+      const data = await fetchConceptSectors(n);
+      setConceptSectors(data.sectors || []);
+    } catch (e) {
+      message.error("概念板块加载失败: " + (e.response?.data?.detail || e.message));
+    } finally {
+      setConceptLoading(false);
+    }
+  }, [n]);
 
   // 分时对比页
   const [compareMethod, setCompareMethod] = useState("rank");
@@ -208,7 +224,10 @@ export default function App() {
     if (activeTab === "l1") {
       loadL1Summary();
     }
-  }, [activeTab, loadL1Summary]);
+    if (activeTab === "concept" && conceptSectors.length === 0) {
+      loadConceptSectors();
+    }
+  }, [activeTab, loadL1Summary, loadConceptSectors, conceptSectors.length]);
 
   // 表格列定义
   const columns = [
@@ -550,6 +569,27 @@ export default function App() {
                     height={520}
                   />
                 </>
+              ),
+            },
+            {
+              key: "concept",
+              label: `概念板块 (${conceptSectors.length})`,
+              children: (
+                <Card title="概念板块宽表" style={{ marginBottom: 16 }}>
+                  <Table
+                    rowKey="code"
+                    columns={columns}
+                    dataSource={conceptSectors}
+                    loading={conceptLoading}
+                    size="small"
+                    scroll={{ x: 1400 }}
+                    expandable={{ expandedRowRender, rowExpandable: () => true }}
+                    pagination={{
+                      pageSize: 50, showSizeChanger: true, pageSizeOptions: [20, 50, 100],
+                      showTotal: (total) => `共 ${total} 个概念板块`,
+                    }}
+                  />
+                </Card>
               ),
             },
           ]}

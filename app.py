@@ -413,6 +413,60 @@ async def get_sectors(
     )
 
 
+@app.get("/api/sectors/concept", response_model=SectorListResponse)
+async def get_concept_sectors(
+    n: int = Query(STRENGTH_WINDOW_N, description="强度判定窗口"),
+    force_refresh: bool = Query(False, description="是否强制刷新"),
+):
+    """概念板块列表 + 当前强度（实时调 westock CLI，不依赖缓存）。"""
+    from concept_sectors import get_default_codes, get_default_name
+    codes = get_default_codes()
+    if not codes:
+        return SectorListResponse(date=date.today().isoformat(), last_update="", n_window=n, sectors=[], total=0)
+
+    # 实时拉概念板块 fund flow（不做缓存，数据量小）
+    from westock import fund_flow
+    flow_records = fund_flow(codes, raw=True)
+    flow_map: dict = {}
+    for r in flow_records:
+        c = r.get("code") or r.get("SecuCode")
+        if c:
+            flow_map[c] = r
+
+    rows = []
+    today_str = date.today().isoformat()
+    for code in codes:
+        flow = flow_map.get(code, {})
+        metrics = calc_sector_metrics(flow, TURNOVER_METHOD) if flow else {}
+        today_net = extract_main_net_flow(flow)
+        today_turnover = metrics.get("turnover")
+        net_5d = _safe_float(flow.get("MainNetFlow5D"))
+        net_10d = _safe_float(flow.get("MainNetFlow10D"))
+        net_20d = _safe_float(flow.get("MainNetFlow20D"))
+
+        # 构建 minimal daily records 用于强度计算
+        records = [{"date": today_str, "net_flow": today_net, "turnover": today_turnover,
+                     "main_net_flow_5d": net_5d, "main_net_flow_10d": net_10d,
+                     "main_net_flow_20d": net_20d}]
+        summary_3d = _build_summary(records, SUMMARY_3D, None)
+        summary_5d = _build_summary(records, SUMMARY_5D, None)
+        strength = _calc_strength_from_records(records, None, n)
+
+        rows.append(SectorRow(
+            code=code, name=flow.get("name") or get_default_name(code),
+            l1="概念", circ_mv_yi=None, scale="小盘",
+            today_net_flow_yi=_to_yi(today_net),
+            today_turnover_yi=_to_yi(today_turnover),
+            today_net_rate=_net_rate(today_net, today_turnover),
+            history=[], summary_3d=summary_3d, summary_5d=summary_5d,
+            strength_value=strength["value"], strength_level=strength["level"],
+        ))
+
+    rows.sort(key=lambda r: r.strength_value, reverse=True)
+    return SectorListResponse(date=today_str, last_update=datetime.now().isoformat(),
+                               n_window=n, sectors=rows, total=len(rows))
+
+
 @app.get("/api/sectors/l1-summary", response_model=L1SummaryResponse)
 async def get_l1_summary(
     n: int = Query(STRENGTH_WINDOW_N, description="强度判定窗口"),
