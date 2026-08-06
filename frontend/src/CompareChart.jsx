@@ -25,9 +25,9 @@ export default function CompareChart({ series = [], title = "板块分时对比"
       };
     }
 
-    // 取第一个板块的时间轴（假设所有板块时间轴对齐）
+    // 取第一个板块的时间轴（使用 ISO timestamp，ECharts time 轴自动按实际时间间距渲染）
     const firstPoints = series[0].points || [];
-    const xs = firstPoints.map((p) => p.time || "");
+    const xs = firstPoints.map((p) => p.timestamp || "");
 
     return {
       title: {
@@ -39,11 +39,14 @@ export default function CompareChart({ series = [], title = "板块分时对比"
         trigger: "axis",
         formatter: (params) => {
           if (!params || !params.length) return "";
-          const time = params[0].axisValue;
+          const ts = params[0].axisValue;
+          // axisValue 在 time 轴上是时间戳(ms)，格式化为 HH:MM:SS
+          const d = new Date(ts);
+          const time = d.toTimeString().slice(0, 8);
           let html = `<b>${time}</b><br/>`;
           params.forEach((p) => {
-            if (p.value == null) return;
-            const v = Number(p.value).toFixed(3);
+            if (p.value == null || p.value[1] == null) return;
+            const v = Number(p.value[1]).toFixed(3);
             const color = COLORS[p.seriesIndex % COLORS.length];
             html += `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:4px;"></span>`;
             html += `${p.seriesName}: ${v} 亿<br/>`;
@@ -61,9 +64,17 @@ export default function CompareChart({ series = [], title = "板块分时对比"
       },
       grid: { left: 50, right: 30, top: 80, bottom: 40 },
       xAxis: {
-        type: "category",
-        data: xs,
-        axisLabel: { rotate: 45, fontSize: 10, interval: Math.max(1, Math.floor(xs.length / 10)) },
+        type: "time",
+        minInterval: 60000,  // 1 分钟最小刻度
+        axisLabel: {
+          rotate: 45,
+          fontSize: 10,
+          formatter: (value) => {
+            const d = new Date(value);
+            return d.toTimeString().slice(0, 5);  // HH:MM
+          },
+        },
+        splitLine: { show: false },
       },
       yAxis: {
         type: "value",
@@ -80,7 +91,7 @@ export default function CompareChart({ series = [], title = "板块分时对比"
         data: (s.points || []).map((p) =>
           p.is_open_anchor || p.minute_delta == null
             ? null
-            : Number(p.minute_delta) / 1e8
+            : [p.timestamp, Number(p.minute_delta) / 1e8]
         ),
       })),
     };
