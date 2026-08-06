@@ -558,7 +558,7 @@ async def get_sector_minute(
         if ts:
             try:
                 dt = datetime.fromisoformat(ts)
-                hhmm = dt.strftime("%H:%M")
+                hhmm = dt.strftime("%H:%M:%S")
             except (ValueError, TypeError):
                 hhmm = ts[11:16] if len(ts) >= 16 else ""
 
@@ -603,7 +603,7 @@ async def get_realtime_minute(
             code: [
                 {
                     "time": (lambda ts: (
-                        datetime.fromisoformat(ts).strftime("%H:%M")
+                        datetime.fromisoformat(ts).strftime("%H:%M:%S")
                         if ts else ""
                     ))(d.get("timestamp")),
                     "main_net_flow": d.get("main_net_flow"),
@@ -687,7 +687,7 @@ async def get_minute_compare(
             hhmm = ""
             if ts:
                 try:
-                    hhmm = datetime.fromisoformat(ts).strftime("%H:%M")
+                    hhmm = datetime.fromisoformat(ts).strftime("%H:%M:%S")
                 except (ValueError, TypeError):
                     hhmm = ts[11:16] if len(ts) >= 16 else ""
             points.append({
