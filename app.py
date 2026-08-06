@@ -426,7 +426,10 @@ async def get_concept_sectors(
 
     # 实时拉概念板块 fund flow（不做缓存，数据量小）
     from westock import fund_flow, extract_main_net_flow
-    from collector import _safe_float
+    def _sf(v):
+        if v is None or v == "": return None
+        try: return float(v)
+        except (TypeError, ValueError): return None
     flow_records = fund_flow(codes, raw=True)
     flow_map: dict = {}
     for r in flow_records:
@@ -441,9 +444,9 @@ async def get_concept_sectors(
         metrics = calc_sector_metrics(flow, TURNOVER_METHOD) if flow else {}
         today_net = extract_main_net_flow(flow)
         today_turnover = metrics.get("turnover")
-        net_5d = _safe_float(flow.get("MainNetFlow5D"))
-        net_10d = _safe_float(flow.get("MainNetFlow10D"))
-        net_20d = _safe_float(flow.get("MainNetFlow20D"))
+        net_5d = _sf(flow.get("MainNetFlow5D"))
+        net_10d = _sf(flow.get("MainNetFlow10D"))
+        net_20d = _sf(flow.get("MainNetFlow20D"))
 
         # 构建 minimal daily records 用于强度计算
         records = [{"date": today_str, "net_flow": today_net, "turnover": today_turnover,
@@ -700,7 +703,11 @@ async def get_minute_compare(
             from westock import fund_flow
             flow_records = fund_flow(all_codes, raw=True)
             flow_map = {r.get("code") or r.get("SecuCode"): r for r in flow_records if r}
-            ranked = [(c, _safe_float(flow_map.get(c, {}).get("MainNetFlow")) or 0) for c in all_codes]
+            def _sf(v):
+                if v is None or v == "": return None
+                try: return float(v)
+                except (TypeError, ValueError): return None
+            ranked = [(c, _sf(flow_map.get(c, {}).get("MainNetFlow")) or 0) for c in all_codes]
         else:
             daily_map = get_daily_map()
             ranked = [(c, (daily_map.get(c, [{}])[0].get("net_flow") or 0)) for c in all_codes]
