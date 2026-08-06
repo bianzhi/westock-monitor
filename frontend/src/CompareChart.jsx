@@ -26,8 +26,6 @@ export default function CompareChart({ series = [], title = "板块分时对比"
     }
 
     // 取第一个板块的时间轴（使用 ISO timestamp，ECharts time 轴自动按实际时间间距渲染）
-    const firstPoints = series[0].points || [];
-    const xs = firstPoints.map((p) => p.timestamp || "");
 
     return {
       title: {
@@ -40,7 +38,6 @@ export default function CompareChart({ series = [], title = "板块分时对比"
         formatter: (params) => {
           if (!params || !params.length) return "";
           const ts = params[0].axisValue;
-          // axisValue 在 time 轴上是时间戳(ms)，格式化为 HH:MM:SS
           const d = new Date(ts);
           const time = d.toTimeString().slice(0, 8);
           let html = `<b>${time}</b><br/>`;
@@ -88,11 +85,11 @@ export default function CompareChart({ series = [], title = "板块分时对比"
         symbol: "none",
         lineStyle: { width: 2, color: COLORS[idx % COLORS.length] },
         itemStyle: { color: COLORS[idx % COLORS.length] },
-        data: (s.points || []).map((p) =>
-          p.is_open_anchor || p.minute_delta == null
-            ? null
-            : [p.timestamp, Number(p.minute_delta) / 1e8]
-        ),
+        data: (s.points || []).map((p) => {
+          if (p.is_open_anchor || p.minute_delta == null) return null;
+          const ts = new Date(p.timestamp).getTime();
+          return [ts, Number(p.minute_delta) / 1e8];
+        }),
       })),
     };
   }, [series, title]);
