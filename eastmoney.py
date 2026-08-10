@@ -16,8 +16,9 @@ API:
 import json
 import logging
 import time
-import urllib.request
 from typing import Any, Dict, List, Optional
+
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -67,16 +68,21 @@ _HEADERS = {
 }
 
 
+# requests session（连接复用 + 统一 UA/Referer）
+_session = requests.Session()
+_session.headers.update(_HEADERS)
+# 禁用代理（走直连，避免代理干扰）
+_session.trust_env = False
+
+
 def _em_get(path: str, params: Dict[str, str], timeout: int = 10) -> Optional[dict]:
     """调用东方财富 JSONP API，返回解析后的 dict。"""
-    qs = "&".join(f"{k}={v}" for k, v in params.items())
-    url = f"{EM_BASE}/{path}?{qs}"
-    logger.debug("eastmoney GET %s", url)
-    req = urllib.request.Request(url, headers=_HEADERS)
+    url = f"{EM_BASE}/{path}"
+    logger.debug("eastmoney GET %s params=%s", url, params)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8")
-        return json.loads(body)
+        resp = _session.get(url, params=params, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()
     except Exception as e:
         logger.warning("eastmoney API error: %s (%s)", e, url[:120])
         return None
