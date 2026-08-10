@@ -484,26 +484,34 @@ async def get_concept_sectors(
             net_10d = _sf(flow.get("MainNetFlow10D"))
             net_20d = _sf(flow.get("MainNetFlow20D"))
 
-            # 概念板块近 N 日：优先读缓存，无缓存时用今日数据（valid_days=1）
+            # 近3日：从缓存取真实日记录累加（缓存空则仅今日，valid_days=1）
             cached_daily = storage.get_concept_daily_batch([code], days=20).get(code, [])
-            records = []
+            records_3d = []
             if cached_daily:
                 for d in cached_daily:
-                    records.append({
+                    records_3d.append({
                         "date": d["trade_date"],
                         "net_flow": d.get("net_flow"),
                         "turnover": d.get("turnover"),
                     })
             else:
-                records.append({
-                    "date": today_str,
-                    "net_flow": today_net,
-                    "turnover": today_turnover,
+                records_3d.append({
+                    "date": today_str, "net_flow": today_net, "turnover": today_turnover,
                 })
 
-            summary_3d = _build_summary(records, SUMMARY_3D, None)
-            summary_5d = _build_summary(records, SUMMARY_5D, None)
-            strength = _calc_strength_from_records(records, None, n)
+            summary_3d = _build_summary(records_3d, SUMMARY_3D, None)
+
+            # 近5日：直接用 API 的 MainNetFlow5D 累计值估算
+            records_5d = [{"date": today_str, "net_flow": today_net, "turnover": today_turnover}]
+            if net_5d is not None and today_net is not None:
+                prev_4d_total = net_5d - today_net
+                if prev_4d_total:
+                    prev_per_day = prev_4d_total / 4.0
+                    for i in range(1, 5):
+                        records_5d.append({"date": f"est_{i}", "net_flow": prev_per_day, "turnover": today_turnover})
+
+            summary_5d = _build_summary(records_5d, SUMMARY_5D, None)
+            strength = _calc_strength_from_records(records_3d, None, n)
 
             rows.append(SectorRow(
                 code=code, name=flow.get("name") or get_default_name(code),
