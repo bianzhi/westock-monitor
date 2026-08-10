@@ -99,9 +99,17 @@ def calc_turnover(
 ) -> Optional[float]:
     """计算板块成交额(元)。
 
+    基金流字段解释：
+      MainInFlow  = 主力主动买入金额（主力作为买方）
+      MainOutFlow = 主力主动卖出金额（主力作为卖方）
+      RetailInFlow  = 散户主动买入金额
+      RetailOutFlow = 散户主动卖出金额
+    每笔交易有一个买方和一个卖方，因此：
+      成交额 = MainInFlow + RetailInFlow  (= MainOutFlow + RetailOutFlow)
+
     Args:
         record: fund flow 单条记录
-        method: "main" 主力口径 / "all" 全口径 / "auto" 优先main。
+        method: "main" 主力买入口径 / "all" 全市场口径 / "auto" 优先all。
                 None 时使用 config.TURNOVER_METHOD（默认 "all"）
 
     Returns:
@@ -116,21 +124,24 @@ def calc_turnover(
     ret_out = extract_retail_outflow(record)
 
     if method == "main":
-        if inf is not None and outf is not None:
-            return inf + outf
+        # 主力作为买方的交易额
+        if inf is not None:
+            return inf
         return None
     elif method == "all":
-        parts = [inf, outf, ret_inf, ret_out]
-        if all(p is not None for p in parts):
-            return inf + outf + ret_inf + ret_out
+        # 全市场成交额 = 买方总和（主力买 + 散户买）
+        if inf is not None and ret_inf is not None:
+            return inf + ret_inf
+        # 买方数据不全时尝试卖方
+        if outf is not None and ret_out is not None:
+            return outf + ret_out
         return None
     elif method == "auto":
-        # 优先 main，缺失则 all
-        if inf is not None and outf is not None:
-            return inf + outf
-        parts = [inf, outf, ret_inf, ret_out]
-        if all(p is not None for p in parts):
-            return inf + outf + ret_inf + ret_out
+        # 优先买方总和，缺失则卖方
+        if inf is not None and ret_inf is not None:
+            return inf + ret_inf
+        if outf is not None and ret_out is not None:
+            return outf + ret_out
         return None
     else:
         logger.warning("calc_turnover: unknown method %s", method)
