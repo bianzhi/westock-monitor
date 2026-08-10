@@ -302,6 +302,62 @@ def collect_minute_snapshot() -> Dict[str, Any]:
     }
 
 
+# 概念板块日快照去重标记（每天只存一次）
+_concept_daily_snapshot_date: str = ""
+_CONCEPT_DAILY_KEEP = 20  # 保留近 20 交易日
+
+
+def collect_concept_daily_snapshot() -> Dict[str, Any]:
+    """收盘后采集全量概念板块当日净流入，写入 concept_daily 表。
+
+    每天只执行一次（按 trade_date 去重），用于近 N 日净值真实累加，
+    替代 MainNetFlow5D 估算。
+    """
+    global _concept_daily_snapshot_date
+    today = date.today().strftime("%Y%m%d")
+    if _concept_daily_snapshot_date == today:
+        return {"skipped": True, "reason": "already snapshotted today"}
+
+    from concept_sectors import get_default_codes, get_default_name
+    from westock import fund_flow as _ff, extract_main_net_flow as _emnf
+    from westock_fund_metrics import calc_sector_metrics
+
+    codes = get_default_codes()
+    if not codes:
+        return {"error": "no concept codes"}
+
+    t0 = time.time()
+    flow_records = _ff(codes, raw=True)
+    elapsed = time.time() - t0
+    logger.info("concept_daily_snapshot: fund_flow %d codes in %.1fs, got %d",
+                len(codes), elapsed, len(flow_records))
+
+    records = []
+    for r in flow_records:
+        code = r.get("code") or r.get("SecuCode")
+        if not code:
+            continue
+        net = _emnf(r)
+        metrics = calc_sector_metrics(r, TURNOVER_METHOD) if r else {}
+        records.append({
+            "code": code,
+            "name": r.get("name") or get_default_name(code),
+            "trade_date": today,
+            "net_flow": net,
+            "turnover": metrics.get("turnover"),
+        })
+
+    if records:
+        storage = get_storage()
+        n = storage.upsert_concept_daily_batch(records)
+        storage.cleanup_concept_daily(_CONCEPT_DAILY_KEEP)
+        _concept_daily_snapshot_date = today
+        logger.info("concept_daily_snapshot: saved %d records for %s", n, today)
+        return {"saved": n, "trade_date": today, "elapsed": round(elapsed, 1)}
+
+    return {"saved": 0, "trade_date": today, "elapsed": round(elapsed, 1)}
+
+
 # ============================================================
 # 日级数据采集（实时拉取，不长期落地）
 # ============================================================
@@ -633,6 +689,11 @@ def run_collector_loop(force: bool = False) -> None:
         trading = is_trading_time(now)
 
         if not trading and not force:
+            # 收盘后采集概念板块日快照（每天仅一次）
+            try:
+                collect_concept_daily_snapshot()
+            except Exception as e:
+                logger.warning("concept_daily_snapshot error: %s", e)
             time.sleep(IDLE_SLEEP)
             backoff = 0
             cycle = 0

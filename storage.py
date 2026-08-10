@@ -178,6 +178,22 @@ class Storage:
                 ON alert_log(trade_date, timestamp)
             """)
 
+            # 概念板块日记录表（收盘后快照，用于近 N 日净值计算）
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS concept_daily (
+                    code            TEXT NOT NULL,
+                    name            TEXT,
+                    trade_date      TEXT NOT NULL,      -- YYYYMMDD
+                    net_flow        REAL,               -- 当日主力净流入(元)
+                    turnover        REAL,               -- 当日成交额(元)
+                    PRIMARY KEY (code, trade_date)
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_concept_daily_date
+                ON concept_daily(trade_date)
+            """)
+
             conn.commit()
         logger.info("storage initialized: %s", self.db_path)
 
@@ -713,6 +729,80 @@ class Storage:
                     (limit,),
                 )
             return [dict(row) for row in cur.fetchall()]
+
+    # ============================================================
+    # 概念板块日记录（收盘后快照，近 20 交易日滚动）
+    # ============================================================
+    def upsert_concept_daily_batch(self, records: List[Dict]) -> int:
+        """批量写入概念板块日记录（按 code + trade_date 去重）。
+
+        Args:
+            records: [{code, name, trade_date(YYYYMMDD), net_flow(元), turnover(元)}, ...]
+
+        Returns:
+            写入行数
+        """
+        if not records:
+            return 0
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            count = 0
+            for r in records:
+                try:
+                    cur.execute(
+                        """INSERT OR REPLACE INTO concept_daily
+                           (code, name, trade_date, net_flow, turnover)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (r["code"], r.get("name"), r["trade_date"],
+                         r.get("net_flow"), r.get("turnover")),
+                    )
+                    count += 1
+                except sqlite3.Error as e:
+                    logger.warning("concept_daily upsert %s: %s", r.get("code"), e)
+            conn.commit()
+        logger.info("concept_daily: upserted %d records", count)
+        return count
+
+    def get_concept_daily_batch(self, codes: List[str], days: int = 20) -> Dict[str, List[Dict]]:
+        """批量获取概念板块近 N 交易日记录。
+
+        Returns:
+            {code: [{trade_date, net_flow, turnover}, ...]}
+        """
+        if not codes:
+            return {}
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            placeholders = ",".join("?" * len(codes))
+            cur.execute(
+                f"""SELECT code, name, trade_date, net_flow, turnover
+                    FROM concept_daily
+                    WHERE code IN ({placeholders})
+                    ORDER BY trade_date DESC
+                    LIMIT ?""",
+                codes + [days * len(codes)],  # 宽松的上限
+            )
+            result: Dict[str, List[Dict]] = {c: [] for c in codes}
+            for row in cur.fetchall():
+                d = dict(row)
+                result[d["code"]].append(d)
+            return result
+
+    def cleanup_concept_daily(self, keep_days: int = 20) -> int:
+        """清理超过 keep_days 天的概念板块日记录。"""
+        from datetime import date, timedelta
+        cutoff = (date.today() - timedelta(days=keep_days)).strftime("%Y%m%d")
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            cur.execute("DELETE FROM concept_daily WHERE trade_date < ?", (cutoff,))
+            deleted = cur.rowcount
+            conn.commit()
+        if deleted:
+            logger.info("concept_daily: cleaned %d old records", deleted)
+        return deleted
 
     # ============================================================
     # 统计信息
