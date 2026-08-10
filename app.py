@@ -767,9 +767,9 @@ async def get_minute_compare(
     if method == "manual" and codes:
         selected = [c.strip() for c in codes.split(",") if c.strip()]
     elif method == "rank":
-        # 按今日净流入倒序 — 概念板块需要实时 fund_flow
+        # 按今日净流入倒序
+        from westock import fund_flow
         if source == "concept":
-            from westock import fund_flow
             flow_records = fund_flow(all_codes, raw=True)
             flow_map = {r.get("code") or r.get("SecuCode"): r for r in flow_records if r}
             def _sf(v):
@@ -779,7 +779,15 @@ async def get_minute_compare(
             ranked = [(c, _sf(flow_map.get(c, {}).get("MainNetFlow")) or 0) for c in all_codes]
         else:
             daily_map = get_daily_map()
-            ranked = [(c, (daily_map.get(c, [{}])[0].get("net_flow") or 0)) for c in all_codes]
+            if daily_map:
+                ranked = [(c, (daily_map.get(c, [{}])[0].get("net_flow") or 0)) for c in all_codes]
+            else:
+                # 缓存未就绪：降级用 fund_flow 实时排名
+                logger.info("get_minute_compare: daily_map empty, falling back to fund_flow for ranking")
+                from westock import extract_main_net_flow as _emnf
+                flow_records = fund_flow(all_codes, raw=True)
+                flow_map = {r.get("code") or r.get("SecuCode"): r for r in flow_records if r}
+                ranked = [(c, _emnf(flow_map.get(c, {})) or 0) for c in all_codes]
         ranked.sort(key=lambda x: x[1], reverse=True)
         ordered_codes = [c for c, _ in ranked]
         selected = ordered_codes[start - 1:end]
@@ -789,6 +797,31 @@ async def get_minute_compare(
 
     # 批量拿分钟数据（采集由后台统一线程负责，API 只读不写）
     deltas_map = storage.get_minute_deltas_batch(selected, trade_date)
+
+    # 分钟数据全空时兜底：调 fund_flow 拿至少一个实时快照点
+    all_empty = all(len(v) == 0 for v in deltas_map.values())
+    if all_empty and selected:
+        logger.info("get_minute_compare: no minute data in storage, falling back to fund_flow snapshot")
+        try:
+            from westock import fund_flow as _ff, extract_main_net_flow as _emnf
+            flow_records = _ff(selected, raw=True)
+            flow_map = {r.get("code") or r.get("SecuCode"): r for r in flow_records}
+            now_ts = datetime.now()
+            now_iso = now_ts.isoformat()
+            for code in selected:
+                flow = flow_map.get(code, {})
+                mnf = _emnf(flow)
+                deltas_map[code] = [{
+                    "timestamp": now_iso,
+                    "main_net_flow": mnf,
+                    "minute_delta": None,
+                    "turnover": None,
+                    "turnover_delta": None,
+                    "is_open_anchor": 1,  # 标记为快照点（非分钟差分），前端可用于特殊显示
+                }]
+            logger.info("get_minute_compare: fund_flow snapshot ok, %d codes", len(flow_map))
+        except Exception as e:
+            logger.warning("get_minute_compare: fund_flow fallback failed: %s", e)
 
     series = []
     for code in selected:
