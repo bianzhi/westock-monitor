@@ -186,6 +186,24 @@ def fund_flow(codes: Union[str, List[str]], raw: bool = True, asof_date: Optiona
         logger.warning("fund_flow: %d codes still missing after all retries: %s",
                        len(missing), sorted(missing)[:10])
 
+        # ---- 东方财富 fallback：腾讯不覆盖的板块走东方财富 ----
+        try:
+            from eastmoney import fund_flow as em_fund_flow
+            from sectors import get_default_sector_map
+            sector_map = get_default_sector_map()
+            em_names = {c: sector_map.get(c, {}).get("name", c) for c in missing}
+            em_results = em_fund_flow(list(missing), names=em_names)
+            if em_results:
+                for r in em_results:
+                    c = _extract_code(r)
+                    if c:
+                        missing.discard(c)
+                results.extend(em_results)
+                logger.info("fund_flow: eastmoney fallback returned %d records, %d still missing",
+                            len(em_results), len(missing))
+        except Exception as e:
+            logger.debug("fund_flow: eastmoney fallback error: %s", e)
+
     logger.info("fund_flow: requested %d codes, got %d records (%d missing)",
                 len(all_codes), len(results), len(missing))
     return results
