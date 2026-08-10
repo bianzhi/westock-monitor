@@ -16,22 +16,76 @@ if [ "${1:-}" = "kill" ]; then
 fi
 
 # ----------------------------------------------------------
-# 1. 杀掉旧服务
+# 1. 杀掉旧服务（多手段兜底 + 验证端口释放）
 # ----------------------------------------------------------
 echo "🔪 检查并杀掉旧服务..."
-killed=0
-for port in 8200 5173; do
+
+_kill_port() {
+    local port="$1"
+    local pids=""
+
+    # 方式1: lsof
     pids=$(lsof -ti ":$port" 2>/dev/null || true)
-    if [ -n "$pids" ]; then
-        echo "   端口 $port → PID $pids"
-        kill $pids 2>/dev/null || true
-        killed=$((killed + 1))
+
+    # 方式2: fuser
+    if [ -z "$pids" ] && command -v fuser &> /dev/null; then
+        pids=$(fuser "$port/tcp" 2>/dev/null | tr -d ' ' || true)
+    fi
+
+    # 方式3: ss + awk
+    if [ -z "$pids" ] && command -v ss &> /dev/null; then
+        pids=$(ss -tlpn "sport = :$port" 2>/dev/null | grep -oP 'pid=\K\d+' | tr '\n' ' ' || true)
+    fi
+
+    # 方式4: netstat as last resort
+    if [ -z "$pids" ] && command -v netstat &> /dev/null; then
+        pids=$(netstat -tlpn 2>/dev/null | grep ":$port " | awk '{print $NF}' | grep -oP '\d+' | tr '\n' ' ' || true)
+    fi
+
+    [ -z "$pids" ] && return 1
+    echo "   端口 $port → PID $pids"
+
+    # 先 SIGTERM，1s 后还在则 SIGKILL
+    kill $pids 2>/dev/null || true
+    sleep 1
+    for pid in $pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "   PID $pid 未响应 SIGTERM，强制 kill -9"
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+    return 0
+}
+
+# 额外：按进程名杀 uvicorn / vite（防 lsof 不可用时的兜底）
+_extra_kill=0
+for name in uvicorn vite node; do
+    extra_pids=$(pgrep -f "$name" 2>/dev/null | tr '\n' ' ' || true)
+    if [ -n "$extra_pids" ]; then
+        echo "   额外清理 $name → PID $extra_pids"
+        kill $extra_pids 2>/dev/null || true
+        _extra_kill=$((_extra_kill + 1))
     fi
 done
-# 等一秒确保端口释放
-if [ $killed -gt 0 ]; then
-    sleep 1
-    echo "✅ 已杀掉 $killed 个旧服务"
+
+# 等端口释放（最多等 5s）
+for port in 8200 5173; do
+    _kill_port "$port" && killed=$((killed + 1))
+    for i in $(seq 1 25); do
+        if ! lsof -ti ":$port" 2>/dev/null | grep -q .; then
+            break
+        fi
+        sleep 0.2
+    done
+    if lsof -ti ":$port" 2>/dev/null | grep -q .; then
+        echo "   ❌ 端口 $port 未能释放！"
+    else
+        echo "   ✅ 端口 $port 已释放"
+    fi
+done
+
+if [ $killed -gt 0 ] || [ $_extra_kill -gt 0 ]; then
+    echo "✅ 已杀掉 $killed 个端口进程 + $_extra_kill 个额外进程"
 else
     echo "   没有运行中的旧服务"
 fi
@@ -166,8 +220,16 @@ nohup python3 -m uvicorn app:app --host 0.0.0.0 --port 8200 \
     > "$LOGDIR/backend.log" 2>&1 &
 BACKEND_PID=$!
 
-# 等待启动
-sleep 2
+# 等待启动（health 就绪最多等 10s）
+echo "   等待后端就绪..."
+_start_ok=false
+for i in $(seq 1 20); do
+    sleep 0.5
+    if curl -sf http://localhost:8200/api/health > /dev/null 2>&1; then
+        _start_ok=true
+        break
+    fi
+done
 
 # ----------------------------------------------------------
 # 5. 验证
@@ -176,20 +238,30 @@ echo ""
 echo "📋 验证服务..."
 ok=true
 
-# 后端（含前端静态文件）
-if curl -sf http://localhost:8200/api/health > /dev/null 2>&1; then
-    echo "   ✅ 后端 http://localhost:8200 (PID $BACKEND_PID)"
+# 后端存活 + health 检查
+if $_start_ok; then
+    health_json=$(curl -sf http://localhost:8200/api/health 2>/dev/null || echo '{}')
+    cache_ready=$(echo "$health_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('cache_ready',False))" 2>/dev/null || echo "?")
+    echo "   ✅ 后端 http://localhost:8200 (PID $BACKEND_PID, cache_ready=$cache_ready)"
 else
-    echo "   ⚠️  后端未就绪，查看 logs/backend.log"
+    echo "   ❌ 后端启动失败！端口 8200 无响应，查看 logs/backend.log"
     ok=false
 fi
 
-# 前端（走 8200 同一端口）
+# 前端
 if curl -sf http://localhost:8200/ > /dev/null 2>&1; then
     echo "   ✅ 前端 http://localhost:8200/"
 else
     echo "   ⚠️  前端未就绪，确认 frontend/dist/ 已编译"
     ok=false
+fi
+
+# 采集线程
+sleep 2  # 等 collector loop 日志落盘
+if grep -q "collector loop started" "$LOGDIR/backend.log" 2>/dev/null; then
+    echo "   ✅ 采集线程已启动"
+else
+    echo "   ⚠️  采集线程未检测到，查看 logs/backend.log"
 fi
 
 echo ""
