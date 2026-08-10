@@ -1,0 +1,22 @@
+[Unit]
+Description=Westock Monitor (FastAPI 板块资金流监控)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/westock-monitor
+Environment=PATH=/root/westock-monitor/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/root/westock-monitor/.venv/bin/python3 -m uvicorn app:app --host 0.0.0.0 --port 8200
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+StandardOutput=append:/root/westock-monitor/logs/backend.log
+StandardError=append:/root/westock-monitor/logs/backend.log
+
+# 安全加固
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

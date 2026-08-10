@@ -74,17 +74,59 @@ _session.headers.update(_HEADERS)
 # 禁用代理（走直连，避免代理干扰）
 _session.trust_env = False
 
+# 熔断器：连续失败 N 次后暂停调用，避免每次 fund_flow 都拖慢/刷错误日志
+_CIRCUIT_FAILURES = 0
+_CIRCUIT_THRESHOLD = 5       # 连续失败 5 次触发熔断
+_CIRCUIT_COOLDOWN = 300       # 熔断冷却 5 分钟
+_CIRCUIT_OPEN_TS: float = 0   # 熔断打开时间戳
+
+
+def _circuit_ok() -> bool:
+    """熔断器是否允许调用。"""
+    global _CIRCUIT_FAILURES, _CIRCUIT_OPEN_TS
+    if _CIRCUIT_FAILURES < _CIRCUIT_THRESHOLD:
+        return True
+    # 超过阈值：检查冷却时间
+    if time.time() - _CIRCUIT_OPEN_TS > _CIRCUIT_COOLDOWN:
+        logger.info("eastmoney: circuit breaker cooling down, retrying...")
+        _CIRCUIT_FAILURES = 0
+        _CIRCUIT_OPEN_TS = 0
+        return True
+    return False
+
+
+def _circuit_record(success: bool):
+    """记录一次调用结果，更新熔断状态。"""
+    global _CIRCUIT_FAILURES, _CIRCUIT_OPEN_TS
+    if success:
+        _CIRCUIT_FAILURES = 0
+        _CIRCUIT_OPEN_TS = 0
+    else:
+        _CIRCUIT_FAILURES += 1
+        if _CIRCUIT_FAILURES >= _CIRCUIT_THRESHOLD:
+            _CIRCUIT_OPEN_TS = time.time()
+            logger.warning("eastmoney: circuit breaker OPEN after %d failures", _CIRCUIT_FAILURES)
+
 
 def _em_get(path: str, params: Dict[str, str], timeout: int = 10) -> Optional[dict]:
-    """调用东方财富 JSONP API，返回解析后的 dict。"""
+    """调用东方财富 JSONP API，返回解析后的 dict。
+
+    熔断期间直接返回 None，不发起 HTTP 请求。
+    """
+    if not _circuit_ok():
+        logger.debug("eastmoney: circuit breaker open, skipping %s", path)
+        return None
+
     url = f"{EM_BASE}/{path}"
     logger.debug("eastmoney GET %s params=%s", url, params)
     try:
         resp = _session.get(url, params=params, timeout=timeout)
         resp.raise_for_status()
+        _circuit_record(True)
         return resp.json()
     except Exception as e:
         logger.warning("eastmoney API error: %s (%s)", e, url[:120])
+        _circuit_record(False)
         return None
 
 

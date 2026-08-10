@@ -1,136 +1,116 @@
 #!/usr/bin/env bash
 # ============================================================
-# Westock Monitor 一键启动脚本 (macOS)
+# Westock Monitor 生产级启动脚本
+#
+# 优先使用 systemd（稳定 + 自动重启），
+# 无 systemd 时降级为 nohup 后台进程。
+#
 # 用法:
-#   ./start.sh          # 启动后端 + 前端 + 采集循环
-#   ./start.sh backend  # 仅启动后端
-#   ./start.sh frontend # 仅启动前端
-#   ./start.sh collector# 仅启动采集循环
+#   ./start.sh          # 启动
+#   ./start.sh --build  # 重新编译前端后启动
 # ============================================================
 set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_DIR"
 
-# 检查 Node.js
-if ! command -v node &> /dev/null; then
-    echo "❌ 未检测到 Node.js，请先安装: brew install node"
-    exit 1
-fi
-if ! command -v npx &> /dev/null; then
-    echo "❌ 未检测到 npx，请升级 Node.js 到 v18+"
-    exit 1
-fi
+VENV_PYTHON="$PROJECT_DIR/.venv/bin/python3"
+LOGDIR="$PROJECT_DIR/logs"
+mkdir -p "$LOGDIR"
 
-NODE_MAJOR=$(node -v | sed 's/v\([0-9]*\)\..*/\1/')
-if [ "$NODE_MAJOR" -lt 18 ]; then
-    echo "❌ Node.js 版本过低 ($(node -v))，需要 v18+"
-    exit 1
+BUILD_FRONTEND=false
+if [ "${1:-}" = "--build" ]; then
+    BUILD_FRONTEND=true
 fi
 
-echo "✅ Node.js $(node -v)"
-
-# 检查 Python
-if ! command -v python3 &> /dev/null; then
-    echo "❌ 未检测到 python3"
-    exit 1
+# ----------------------------------------------------------
+# 1. 编译前端
+# ----------------------------------------------------------
+if $BUILD_FRONTEND || [ ! -d "frontend/dist" ]; then
+    echo "🏗️  编译前端..."
+    cd frontend
+    if [ ! -d "node_modules" ]; then
+        npm install --silent
+    fi
+    npm run build -- --emptyOutDir 2>&1 | tail -3
+    cd "$PROJECT_DIR"
+    echo "✅ 前端编译完成"
 fi
 
-PY_MAJOR=$(python3 -c 'import sys; print(sys.version_info[0])')
-PY_MINOR=$(python3 -c 'import sys; print(sys.version_info[1])')
-if [ "$PY_MAJOR" -lt 3 ] || ([ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 8 ]); then
-    echo "❌ Python 版本过低 ($(python3 --version))，需要 3.8+"
-    exit 1
-fi
-
-echo "✅ Python $(python3 --version)"
-
-# 创建虚拟环境
-if [ ! -d ".venv" ]; then
-    echo "📦 创建虚拟环境..."
+# ----------------------------------------------------------
+# 2. 确保虚拟环境 + 依赖
+# ----------------------------------------------------------
+if [ ! -f "$VENV_PYTHON" ]; then
+    echo "📦 创建 Python 虚拟环境..."
     python3 -m venv .venv
 fi
 
-source .venv/bin/activate
-
-# 安装依赖
-if [ ! -f ".venv/.deps_installed" ]; then
-    echo "📦 安装 Python 依赖..."
-    pip install --upgrade pip -q
-    pip install -r requirements.txt -q
+if [ ! -f ".venv/.deps_installed" ] || [ "requirements.txt" -nt ".venv/.deps_installed" ]; then
+    echo "📦 安装/更新 Python 依赖..."
+    "$VENV_PYTHON" -m pip install --upgrade pip -q 2>/dev/null
+    "$VENV_PYTHON" -m pip install -r requirements.txt -q
     touch .venv/.deps_installed
 fi
 
-echo "✅ Python 依赖已安装"
-
-# 验证 westock-data 可用
-echo "🔍 验证 westock-data CLI..."
-if ! npx -y westock-data-skillhub@1.0.5 sector --help &> /dev/null; then
-    echo "⚠️  westock-data CLI 验证失败，请检查网络"
+# ----------------------------------------------------------
+# 3. 先停旧进程
+# ----------------------------------------------------------
+if command -v systemctl &> /dev/null && systemctl is-active --quiet westock-monitor 2>/dev/null; then
+    echo "🔪 停止旧 systemd 服务..."
+    systemctl stop westock-monitor
 else
-    echo "✅ westock-data CLI 可用"
+    pids=$(pgrep -f "uvicorn app:app" 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+        echo "🔪 杀掉旧进程: $pids"
+        kill $pids 2>/dev/null || true
+        sleep 1
+    fi
 fi
 
-# ============================================================
-# 启动模式
-# ============================================================
-MODE="${1:-all}"
+# ----------------------------------------------------------
+# 4. 启动
+# ----------------------------------------------------------
+SERVICE_FILE="$PROJECT_DIR/westock-monitor.service"
 
-start_backend() {
-    echo "🚀 启动 FastAPI 后端 (端口 8200)..."
-    uvicorn app:app --host 0.0.0.0 --port 8200 --reload
-}
+if command -v systemctl &> /dev/null; then
+    echo "🚀 安装 systemd 服务..."
+    cp "$SERVICE_FILE" /etc/systemd/system/westock-monitor.service
+    # 替换 WorkingDirectory 路径为实际路径
+    sed -i "s|WorkingDirectory=.*|WorkingDirectory=$PROJECT_DIR|" /etc/systemd/system/westock-monitor.service
+    sed -i "s|ExecStart=.*|ExecStart=$VENV_PYTHON -m uvicorn app:app --host 0.0.0.0 --port 8200|" /etc/systemd/system/westock-monitor.service
+    sed -i "s|Environment=PATH=.*|Environment=PATH=$PROJECT_DIR/.venv/bin:/usr/local/bin:/usr/bin:/bin|" /etc/systemd/system/westock-monitor.service
+    sed -i "s|StandardOutput=.*|StandardOutput=append:$LOGDIR/backend.log|" /etc/systemd/system/westock-monitor.service
+    sed -i "s|StandardError=.*|StandardError=append:$LOGDIR/backend.log|" /etc/systemd/system/westock-monitor.service
 
-start_frontend() {
-    echo "🚀 启动 React 前端 (端口 5173)..."
-    cd frontend
-    if [ ! -d "node_modules" ]; then
-        echo "📦 安装前端依赖..."
-        npm install --silent
+    systemctl daemon-reload
+    systemctl enable westock-monitor
+    systemctl start westock-monitor
+
+    echo "✅ systemd 服务已启动"
+    echo "   状态: systemctl status westock-monitor"
+    echo "   日志: journalctl -u westock-monitor -f"
+    echo "   停止: systemctl stop westock-monitor"
+else
+    echo "🚀 无 systemd，降级为 nohup 后台进程..."
+    nohup "$VENV_PYTHON" -m uvicorn app:app --host 0.0.0.0 --port 8200 \
+        > "$LOGDIR/backend.log" 2>&1 &
+    PID=$!
+    echo "✅ 后台进程已启动 (PID $PID)"
+    echo "   停止: kill $PID"
+fi
+
+# ----------------------------------------------------------
+# 5. 验证
+# ----------------------------------------------------------
+echo ""
+echo "⏳ 等待服务就绪..."
+for i in $(seq 1 20); do
+    sleep 0.5
+    if curl -sf http://localhost:8200/api/health > /dev/null 2>&1; then
+        echo "✅ 服务就绪: http://localhost:8200"
+        echo "   API 文档: http://localhost:8200/docs"
+        exit 0
     fi
-    npm run dev
-}
-
-start_collector() {
-    echo "🚀 启动采集循环..."
-    python collector.py --loop
-}
-
-case "$MODE" in
-    backend)
-        start_backend
-        ;;
-    frontend)
-        start_frontend
-        ;;
-    collector)
-        start_collector
-        ;;
-    all)
-        echo "🚀 启动全部服务..."
-        # 后端
-        start_backend &
-        BACKEND_PID=$!
-        # 前端
-        start_frontend &
-        FRONTEND_PID=$!
-        # 采集
-        start_collector &
-        COLLECTOR_PID=$!
-
-        echo ""
-        echo "✅ 全部服务已启动"
-        echo "   后端:    http://localhost:8200 (PID $BACKEND_PID)"
-        echo "   前端:    http://localhost:5173 (PID $FRONTEND_PID)"
-        echo "   采集器:  PID $COLLECTOR_PID"
-        echo ""
-        echo "按 Ctrl+C 停止所有服务"
-
-        trap "kill $BACKEND_PID $FRONTEND_PID $COLLECTOR_PID 2>/dev/null; exit" SIGINT SIGTERM
-        wait
-        ;;
-    *)
-        echo "用法: $0 {all|backend|frontend|collector}"
-        exit 1
-        ;;
-esac
+done
+echo "⚠️  服务未就绪，查看 $LOGDIR/backend.log"
+exit 1
