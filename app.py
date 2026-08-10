@@ -814,10 +814,10 @@ async def get_minute_compare(
                 deltas_map[code] = [{
                     "timestamp": now_iso,
                     "main_net_flow": mnf,
-                    "minute_delta": None,
+                    "minute_delta": 0,        # 快照无差分数据，填 0 避免前端"每分钟"模式全过滤
                     "turnover": None,
                     "turnover_delta": None,
-                    "is_open_anchor": 1,  # 标记为快照点（非分钟差分），前端可用于特殊显示
+                    "is_open_anchor": 0,      # 非真实开盘锚点，允许前端渲染
                 }]
             logger.info("get_minute_compare: fund_flow snapshot ok, %d codes", len(flow_map))
         except Exception as e:
