@@ -295,6 +295,14 @@ export default function App() {
       render: (_, r) => <NetRateText value={r.today_net_rate} />,
     },
     {
+      title: "今日成交额(亿)",
+      dataIndex: "today_turnover_yi",
+      key: "today_turnover",
+      width: 130,
+      sorter: (a, b) => (a.today_turnover_yi ?? 0) - (b.today_turnover_yi ?? 0),
+      render: (v) => (v != null ? v.toFixed(2) : "-"),
+    },
+    {
       title: "近3日净流入(亿)",
       key: "sum3_net",
       width: 160,
