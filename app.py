@@ -629,6 +629,39 @@ async def get_sector_detail(
 ):
     """单板块详情：近n日数据 + 强度判定"""
     storage = get_storage()
+
+    # 概念板块：实时 fund_flow（无日级缓存）
+    if code.startswith("pt02"):
+        from concept_sectors import get_default_name
+        from westock import fund_flow as _ff, extract_main_net_flow as _emnf
+        flow_records = _ff([code], raw=True)
+        if not flow_records:
+            raise HTTPException(status_code=404, detail=f"concept sector {code} not found")
+        flow = flow_records[0]
+        today_net = _emnf(flow)
+        metrics = calc_sector_metrics(flow, TURNOVER_METHOD) if flow else {}
+        today_turnover = metrics.get("turnover")
+        today_str = date.today().isoformat()
+        records = [{"date": today_str, "net_flow": today_net, "turnover": today_turnover}]
+        strength = _calc_strength_from_records(records, None, n)
+        history = _build_history(records, None, n)
+        summary_3d = _build_summary(records, SUMMARY_3D, None)
+        summary_5d = _build_summary(records, SUMMARY_5D, None)
+        name = flow.get("name") or get_default_name(code)
+        return {
+            "code": code,
+            "name": name,
+            "l1": "概念",
+            "circ_mv_yi": None,
+            "scale": "小盘",
+            "n_window": n,
+            "records": history,
+            "summary_3d": summary_3d,
+            "summary_5d": summary_5d,
+            "strength": strength,
+        }
+
+    # l2 板块：走缓存 + 日级数据
     meta = storage.get_sector_meta(code)
     if not meta:
         raise HTTPException(status_code=404, detail=f"sector {code} not found")
