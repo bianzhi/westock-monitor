@@ -48,25 +48,23 @@ export default function App() {
 
   const loadConceptSectors = useCallback(async () => {
     setConceptLoading(true);
-    // 预热期/CLI 偶发抖动时指数退避重试（与 loadSectors 一致策略）
     const MAX_RETRIES = 5;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
         const data = await fetchConceptSectors(n);
         setConceptSectors(data.sectors || []);
+        setConceptLoading(false);
         return;
       } catch (e) {
         const status = e.response?.status;
-        // 503 = 预热期，可重试；最后一次失败才报错
         if (status === 503 && attempt < MAX_RETRIES) {
           const delay = Math.min(1000 * Math.pow(1.8, attempt), 8000);
           await new Promise((r) => setTimeout(r, delay));
           continue;
         }
         message.error("概念板块加载失败: " + (e.response?.data?.detail || e.message));
+        setConceptLoading(false);
         return;
-      } finally {
-        if (attempt === MAX_RETRIES) setConceptLoading(false);
       }
     }
     setConceptLoading(false);
