@@ -120,9 +120,49 @@ def _fetch_all_em_sectors() -> Dict[str, str]:
         "np": "1",
         "fltt": "2",
         "invt": "2",
-        "fs": "m:90+t2",
+        "fs": "m:90+t2",         # 行业板块
         "fields": "f12,f14",
     }, timeout=15)
+
+    # rc=102 通常是 fs 格式问题，尝试备选格式
+    if not data or data.get("rc") != 0:
+        data = _em_get("clist/get", {
+            "fid": "f62",
+            "po": "1",
+            "pz": "200",
+            "pn": "1",
+            "np": "1",
+            "fltt": "2",
+            "invt": "2",
+            "fs": "b:BK0437+t2",  # 尝试银行板块做探针
+            "fields": "f12,f14",
+        }, timeout=15)
+
+    # 仍失败则逐页拉取（某些版本不支持单次 200）
+    if not data or data.get("rc") != 0:
+        logger.info("eastmoney: trying paginated fetch...")
+        all_diff = []
+        for page in range(1, 6):
+            page_data = _em_get("clist/get", {
+                "fid": "f62",
+                "po": "1",
+                "pz": "30",
+                "pn": str(page),
+                "np": "1",
+                "fltt": "2",
+                "invt": "2",
+                "fs": "m:90+t2",
+                "fields": "f12,f14",
+            }, timeout=10)
+            if page_data and page_data.get("rc") == 0:
+                diff = page_data.get("data", {}).get("diff") or []
+                all_diff.extend(diff)
+                if len(diff) < 30:
+                    break
+            else:
+                break
+        if all_diff:
+            data = {"rc": 0, "data": {"total": len(all_diff), "diff": all_diff}}
 
     result: Dict[str, str] = {}
     if data and data.get("rc") == 0 and "data" in data:
