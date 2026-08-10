@@ -281,6 +281,14 @@ export default function App() {
       render: (s) => <ScaleTag scale={s} />,
     },
     {
+      title: "今日成交额(亿)",
+      dataIndex: "today_turnover_yi",
+      key: "today_turnover",
+      width: 130,
+      sorter: (a, b) => (a.today_turnover_yi ?? 0) - (b.today_turnover_yi ?? 0),
+      render: (v) => (v != null ? v.toFixed(2) : "-"),
+    },
+    {
       title: "今日净流入(亿)",
       key: "today_net",
       width: 150,
@@ -293,14 +301,6 @@ export default function App() {
       width: 110,
       sorter: (a, b) => (a.today_net_rate ?? -999) - (b.today_net_rate ?? -999),
       render: (_, r) => <NetRateText value={r.today_net_rate} />,
-    },
-    {
-      title: "今日成交额(亿)",
-      dataIndex: "today_turnover_yi",
-      key: "today_turnover",
-      width: 130,
-      sorter: (a, b) => (a.today_turnover_yi ?? 0) - (b.today_turnover_yi ?? 0),
-      render: (v) => (v != null ? v.toFixed(2) : "-"),
     },
     {
       title: "近3日净流入(亿)",
