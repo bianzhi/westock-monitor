@@ -40,6 +40,7 @@ from config import (
     API_HOST, API_PORT, CORS_ORIGINS,
     STRENGTH_WINDOW_N, DISPLAY_DAYS, SUMMARY_3D, SUMMARY_5D,
     SCALE_THRESHOLDS, get_scale, SCALE_TURNOVER_RATE, LOG_DIR, BASE_DIR,
+    TURNOVER_METHOD,
 )
 from sectors import DEFAULT_SECTORS, get_default_sector_map
 from storage import get_storage
