@@ -162,6 +162,13 @@ fi
 echo "✅ Python $(python3 --version)"
 echo "✅ Node.js $(node -v)"
 
+# 全局安装 westock-data（跳过 npx 启动开销 ~0.5s/次）
+if ! command -v westock-data &> /dev/null; then
+    echo "📦 全局安装 westock-data..."
+    npm install -g westock-data-skillhub@1.0.5 --silent
+fi
+echo "✅ westock-data $(westock-data --version 2>/dev/null || echo 'ok')"
+
 # ----------------------------------------------------------
 # 3. 编译前端
 # ----------------------------------------------------------

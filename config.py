@@ -19,14 +19,22 @@ SECTORS_CACHE = DATA_DIR / "sectors.json"
 for _d in (DATA_DIR, LOG_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
+import os
+import shutil
+
 # ============================================================
 # westock-data CLI 配置
 # ============================================================
 WESTOCK_PKG = os.getenv("WESTOCK_PKG", "westock-data-skillhub@1.0.5")
-WESTOCK_CMD = ["npx", "-y", WESTOCK_PKG]
+# 优先使用全局安装的二进制（跳过 npx 启动开销 ~0.5s/次），未安装则降级 npx
+_WESTOCK_BIN = shutil.which("westock-data")
+if _WESTOCK_BIN:
+    WESTOCK_CMD = [_WESTOCK_BIN]
+else:
+    WESTOCK_CMD = ["npx", "-y", WESTOCK_PKG]
 WESTOCK_TIMEOUT = int(os.getenv("WESTOCK_TIMEOUT", "30"))   # 单次调用超时(秒)
 WESTOCK_BATCH_SIZE = int(os.getenv("WESTOCK_BATCH_SIZE", "20"))  # 批量分批每批数量
-WESTOCK_WORKERS = int(os.getenv("WESTOCK_WORKERS", "8"))    # 并发线程数
+WESTOCK_WORKERS = int(os.getenv("WESTOCK_WORKERS", "12"))    # 并发线程数
 
 # ============================================================
 # 交易时段配置 (A股)
