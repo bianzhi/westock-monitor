@@ -45,6 +45,10 @@ _preload_n = 10  # 默认预加载 10 个交易日
 _refresh_in_progress = False  # 后台刷新去重锁标记
 _refresh_last_error: Optional[str] = None  # 最近一次刷新错误（None 表示成功或未跑过）
 
+# 启动初始化诊断
+_init_retry_count: int = 0  # init_cache 重试次数
+_init_last_error: Optional[str] = None  # 最近一次 init_cache 错误
+
 # 告警检测状态：记录上一次各板块的强度档位，刷新后对比变化
 _prev_strength: Dict[str, Dict[str, Any]] = {}  # {code: {"level": str, "value": float}}
 
@@ -52,6 +56,27 @@ _prev_strength: Dict[str, Dict[str, Any]] = {}  # {code: {"level": str, "value":
 def is_ready() -> bool:
     """缓存是否就绪（启动预加载完成）。"""
     return _ready
+
+
+def _set_init_error(err: Optional[str]) -> None:
+    """设置启动初始化的最近错误（供 health API 诊断用）。"""
+    global _init_last_error
+    _init_last_error = err
+
+
+def _inc_init_retry() -> None:
+    """累加启动初始化重试次数。"""
+    global _init_retry_count
+    _init_retry_count += 1
+
+
+def get_init_status() -> dict:
+    """获取启动初始化状态（供 health API 诊断）。"""
+    return {
+        "ready": _ready,
+        "retry_count": _init_retry_count,
+        "last_error": _init_last_error,
+    }
 
 
 def get_updated_time() -> Optional[str]:

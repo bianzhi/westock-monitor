@@ -59,7 +59,7 @@ from data_cache import (
     get_codes as cache_get_codes, get_sectors as cache_get_sectors,
     get_daily_map, get_circ_mv_map, get_circ_mv, start_background_refresh,
     trigger_background_refresh, is_refresh_in_progress, get_refresh_last_error,
-    get_updated_time,
+    get_updated_time, get_init_status,
 )
 
 # ============================================================
@@ -73,6 +73,7 @@ CACHE_TTL_SEC = 15  # 15s 内重复请求直接返回缓存
 _concept_cache: Dict[str, Any] = {}
 _concept_cache_lock = threading.Lock()
 CONCEPT_CACHE_TTL_SEC = 15  # 15s 内重复请求直接返回缓存，避免每次切 tab 都同步阻塞调 CLI
+_concept_fail_count: int = 0  # CLI 连续失败次数（成功时重置）
 
 # ============================================================
 # 日志配置
@@ -293,12 +294,14 @@ async def health():
     """健康检查 + 存储状态 + 缓存状态"""
     storage = get_storage()
     stats = storage.get_stats()
+    init_status = get_init_status()
     return {
         "status": "ok",
         "timestamp": datetime.now().isoformat(),
         "trading": is_trading_time(),
         "storage": stats,
         "cache_ready": is_ready(),
+        "cache_init": init_status,
         "cache_refreshing": is_refresh_in_progress(),
         "cache_last_error": get_refresh_last_error(),
         "cache_updated": get_updated_time(),
@@ -429,9 +432,10 @@ async def get_concept_sectors(
     与二级板块不同，概念板块不依赖 data_cache（量小、变动快、与二级板块
     代码空间隔离），每次请求实时拉 fund flow。因此**不检查 is_ready()**——
     即便二级板块缓存还在预热，概念板块只要 CLI 可用就能返回数据。
-    为避免切 tab 触发的雪崩式 CLI 调用，加 15s 内存缓存；CLI 异常兜底
-    返回 503 让前端重试。
+    为避免切 tab 触发的雪崩式 CLI 调用，加 15s 内存缓存；CLI 异常时有
+    缓存则返回旧缓存，连续失败超过阈值时返回空列表（不再 503）。
     """
+    global _concept_fail_count
     cache_key = f"concept_{n}"
     now = time.time()
 
@@ -507,14 +511,33 @@ async def get_concept_sectors(
         with _concept_cache_lock:
             _concept_cache[cache_key] = {"ts": now, "data": resp}
 
+        _concept_fail_count = 0  # 成功后重置失败计数
         return resp
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("get_concept_sectors failed: %s", e)
-        # CLI 异常返回 503 让前端重试，而非 500 直接失败
-        raise HTTPException(status_code=503, detail=f"concept fund flow failed: {e}")
+        _concept_fail_count += 1
+        logger.exception("get_concept_sectors failed (consecutive=%d): %s", _concept_fail_count, e)
+
+        # 有旧缓存则返回旧缓存（过期也先顶上）
+        with _concept_cache_lock:
+            entry = _concept_cache.get(cache_key)
+            if entry:
+                logger.info("get_concept_sectors: returning stale cache (age=%.1fs)", now - entry["ts"])
+                return entry["data"]
+
+        # 连续失败 ≤3 次：503 让前端重试，CLI 可能只是暂时抖动
+        if _concept_fail_count <= 3:
+            raise HTTPException(status_code=503, detail=f"concept fund flow failed: {e}")
+
+        # 连续失败 >3 次：CLI 确认不可用，返回空列表不再 503
+        logger.warning("get_concept_sectors: %d consecutive failures, returning empty (CLI unavailable)",
+                       _concept_fail_count)
+        return SectorListResponse(
+            date=date.today().isoformat(), last_update="",
+            n_window=n, sectors=[], total=0,
+        )
 
 
 @app.get("/api/sectors/l1-summary", response_model=L1SummaryResponse)
@@ -1305,10 +1328,14 @@ try:
         stats = storage.get_stats()
         logger.info("storage stats: %s", stats)
 
-        # 后台线程：预热 + 缓存加载（不阻塞启动）
+        # 后台线程：预热 + 缓存加载（不阻塞启动，失败自动重试）
         def _bg_init():
-            """后台初始化：预热 CLI → 加载缓存 → 启动定时刷新"""
+            """后台初始化：预热 CLI → 加载缓存 → 启动定时刷新。
+            若 init_cache 失败，每 30s 自动重试，最多 10 次（共 5 分钟窗口）。
+            """
             import time as _time
+            from data_cache import _set_init_error, _inc_init_retry
+
             try:
                 from westock import fund_flow
                 fund_flow(["pt01801081"], raw=True)
@@ -1316,15 +1343,32 @@ try:
             except Exception as e:
                 logger.warning("westock CLI warmup failed: %s", e)
 
-            try:
-                ok = init_cache(n=10)
-                if ok:
-                    logger.info("data_cache: preloaded, %d codes ready", len(cache_get_codes()))
-                    start_background_refresh(interval_sec=60)
-                else:
-                    logger.error("data_cache: preload FAILED")
-            except Exception as e:
-                logger.error("data_cache: preload error: %s", e, exc_info=True)
+            max_retries = 10
+            for attempt in range(1, max_retries + 1):
+                try:
+                    ok = init_cache(n=10)
+                    if ok:
+                        logger.info("data_cache: preloaded, %d codes ready (attempt %d)",
+                                    len(cache_get_codes()), attempt)
+                        start_background_refresh(interval_sec=60)
+                        _set_init_error(None)
+                        return
+                    else:
+                        _inc_init_retry()
+                        _set_init_error(f"init_cache returned False (attempt {attempt}/{max_retries})")
+                        logger.error("data_cache: preload FAILED (attempt %d/%d)", attempt, max_retries)
+                except Exception as e:
+                    _inc_init_retry()
+                    _set_init_error(f"init_cache exception: {e} (attempt {attempt}/{max_retries})")
+                    logger.error("data_cache: preload error (attempt %d/%d): %s",
+                                 attempt, max_retries, e, exc_info=True)
+
+                if attempt < max_retries:
+                    logger.info("data_cache: retrying init_cache in 30s (attempt %d/%d)...",
+                                attempt, max_retries)
+                    _time.sleep(30)
+
+            logger.error("data_cache: all %d init_cache attempts FAILED, giving up", max_retries)
 
         threading.Thread(target=_bg_init, daemon=True, name="startup_init").start()
         logger.info("app startup complete (cache loading in background)")
@@ -1357,6 +1401,7 @@ except ImportError:
 
         def _bg_init():
             import time as _time
+            from data_cache import _set_init_error, _inc_init_retry
             try:
                 from westock import fund_flow
                 fund_flow(["pt01801081"], raw=True)
@@ -1364,15 +1409,32 @@ except ImportError:
             except Exception as e:
                 logger.warning("westock CLI warmup failed: %s", e)
 
-            try:
-                ok = init_cache(n=10)
-                if ok:
-                    logger.info("data_cache: preloaded, %d codes ready", len(cache_get_codes()))
-                    start_background_refresh(interval_sec=60)
-                else:
-                    logger.error("data_cache: preload FAILED")
-            except Exception as e:
-                logger.error("data_cache: preload error: %s", e, exc_info=True)
+            max_retries = 10
+            for attempt in range(1, max_retries + 1):
+                try:
+                    ok = init_cache(n=10)
+                    if ok:
+                        logger.info("data_cache: preloaded, %d codes ready (attempt %d)",
+                                    len(cache_get_codes()), attempt)
+                        start_background_refresh(interval_sec=60)
+                        _set_init_error(None)
+                        return
+                    else:
+                        _inc_init_retry()
+                        _set_init_error(f"init_cache returned False (attempt {attempt}/{max_retries})")
+                        logger.error("data_cache: preload FAILED (attempt %d/%d)", attempt, max_retries)
+                except Exception as e:
+                    _inc_init_retry()
+                    _set_init_error(f"init_cache exception: {e} (attempt {attempt}/{max_retries})")
+                    logger.error("data_cache: preload error (attempt %d/%d): %s",
+                                 attempt, max_retries, e, exc_info=True)
+
+                if attempt < max_retries:
+                    logger.info("data_cache: retrying init_cache in 30s (attempt %d/%d)...",
+                                attempt, max_retries)
+                    _time.sleep(30)
+
+            logger.error("data_cache: all %d init_cache attempts FAILED, giving up", max_retries)
 
         threading.Thread(target=_bg_init, daemon=True, name="startup_init").start()
         logger.info("app startup complete (cache loading in background)")
