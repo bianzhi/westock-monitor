@@ -105,7 +105,7 @@ CIRC_MV_CHECK_INTERVAL = int(os.getenv("CIRC_MV_CHECK_INTERVAL", "300"))
 # 数据保留策略
 # ============================================================
 # 分钟级数据缓存天数
-MINUTE_CACHE_DAYS = int(os.getenv("MINUTE_CACHE_DAYS", "5"))
+MINUTE_CACHE_DAYS = int(os.getenv("MINUTE_CACHE_DAYS", "2"))
 
 # ============================================================
 # 服务配置
