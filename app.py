@@ -484,10 +484,15 @@ async def get_concept_sectors(
             net_10d = _sf(flow.get("MainNetFlow10D"))
             net_20d = _sf(flow.get("MainNetFlow20D"))
 
-            # 构建 minimal daily records 用于强度计算
-            records = [{"date": today_str, "net_flow": today_net, "turnover": today_turnover,
-                         "main_net_flow_5d": net_5d, "main_net_flow_10d": net_10d,
-                         "main_net_flow_20d": net_20d}]
+            # 概念板块无日级缓存，用 fund_flow 累计字段推算近 N 日净流入
+            # MainNetFlow5D = 5 日累计，MainNetFlow = 今日
+            prev_4d_total = (net_5d - today_net) if (net_5d is not None and today_net is not None) else 0
+            prev_per_day = prev_4d_total / 4.0 if prev_4d_total else 0
+
+            records = [{"date": today_str, "net_flow": today_net, "turnover": today_turnover}]
+            for i in range(1, 5):
+                records.append({"date": f"est_{i}", "net_flow": prev_per_day, "turnover": today_turnover})
+
             summary_3d = _build_summary(records, SUMMARY_3D, None)
             summary_5d = _build_summary(records, SUMMARY_5D, None)
             strength = _calc_strength_from_records(records, None, n)
