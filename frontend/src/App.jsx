@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import React, { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import {
   Layout, Table, Button, Input, Select, Card, Row, Col, Statistic,
   message, Space, Modal, Descriptions, Spin, Tabs, Switch, InputNumber,
@@ -244,8 +244,8 @@ export default function App() {
     }
   }, [activeTab, loadL1Summary, loadConceptSectors, conceptSectors.length]);
 
-  // 表格列定义
-  const columns = [
+  // 表格列定义（useMemo 避免每次渲染重建引用导致 Table 闪烁）
+  const columns = useMemo(() => [
     {
       title: "板块名称",
       dataIndex: "name",
@@ -347,7 +347,7 @@ export default function App() {
         <StrengthTag level={r.strength_level} value={r.strength_value} />
       ),
     },
-  ];
+  ], []);
 
   // 行展开内容
   const expandedRowRender = (record) => (
