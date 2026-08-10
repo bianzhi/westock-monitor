@@ -100,107 +100,20 @@ def _get_sector_quote(bk_code: str, timeout: int = 10) -> Optional[Dict]:
 
 
 # ============================================================
-# 名称 → BK 代码自动发现
+# BK 代码查找（仅静态映射）
 # ============================================================
-_NAME_TO_BK: Optional[Dict[str, str]] = None
-_NAME_FETCH_TS: float = 0
-_NAME_CACHE_TTL = 3600  # 1 小时刷新一次行业列表
+# 注意：clist/get 行业列表接口在服务器上被东方财富拒绝（rc=102 / 连接重置），
+# 因此无法通过名称自动发现 BK 代码。未在 SW_TO_BK 中的板块不做东方财富查询。
+# 
+# 3 个申万板块在东方财富也不存在独立行业分类：
+#   801217 本地生活服务Ⅱ  — 东方财富无此行业
+#   801768 社交Ⅱ          — 东方财富无此行业  
+#   801786 其他银行Ⅱ      — 东方财富仅「银行Ⅱ」BK0475
 
 
-def _fetch_all_em_sectors() -> Dict[str, str]:
-    """从东方财富拉取全量行业板块列表，返回 name → BK code 映射。
-
-    接口回包格式（每行一个板块）：
-      {rc:0, data:{total:N, diff:[{f12:"BK1255", f14:"林业Ⅱ"}, ...]}}
-    """
-    global _NAME_TO_BK, _NAME_FETCH_TS
-    now = time.time()
-    if _NAME_TO_BK is not None and (now - _NAME_FETCH_TS) < _NAME_CACHE_TTL:
-        return _NAME_TO_BK
-
-    data = _em_get("clist/get", {
-        "fid": "f62",
-        "po": "1",
-        "pz": "200",
-        "pn": "1",
-        "np": "1",
-        "fltt": "2",
-        "invt": "2",
-        "fs": "m:90+t2",         # 行业板块
-        "fields": "f12,f14",
-    }, timeout=15)
-
-    # rc=102 通常是 fs 格式问题，尝试备选格式
-    if not data or data.get("rc") != 0:
-        data = _em_get("clist/get", {
-            "fid": "f62",
-            "po": "1",
-            "pz": "200",
-            "pn": "1",
-            "np": "1",
-            "fltt": "2",
-            "invt": "2",
-            "fs": "b:BK0437+t2",  # 尝试银行板块做探针
-            "fields": "f12,f14",
-        }, timeout=15)
-
-    # 仍失败则逐页拉取（某些版本不支持单次 200）
-    if not data or data.get("rc") != 0:
-        logger.info("eastmoney: trying paginated fetch...")
-        all_diff = []
-        for page in range(1, 6):
-            page_data = _em_get("clist/get", {
-                "fid": "f62",
-                "po": "1",
-                "pz": "30",
-                "pn": str(page),
-                "np": "1",
-                "fltt": "2",
-                "invt": "2",
-                "fs": "m:90+t2",
-                "fields": "f12,f14",
-            }, timeout=10)
-            if page_data and page_data.get("rc") == 0:
-                diff = page_data.get("data", {}).get("diff") or []
-                all_diff.extend(diff)
-                if len(diff) < 30:
-                    break
-            else:
-                break
-        if all_diff:
-            data = {"rc": 0, "data": {"total": len(all_diff), "diff": all_diff}}
-
-    result: Dict[str, str] = {}
-    if data and data.get("rc") == 0 and "data" in data:
-        diff = data["data"].get("diff") or []
-        for item in diff:
-            code = item.get("f12", "")
-            name = item.get("f14", "")
-            if code and name:
-                result[name] = code
-        logger.info("eastmoney: fetched %d industry sectors", len(result))
-    else:
-        logger.warning("eastmoney: failed to fetch sector list, rc=%s", data.get("rc") if data else "None")
-
-    _NAME_TO_BK = result
-    _NAME_FETCH_TS = now
-    return result
-
-
-def _find_bk_code(sw_code: str, sector_name: str) -> Optional[str]:
-    """通过板块名称查找东方财富 BK 代码。"""
-    # 先查静态映射
-    bk = SW_TO_BK.get(sw_code)
-    if bk:
-        return bk
-
-    # 名称自动发现
-    em_sectors = _fetch_all_em_sectors()
-    bk = em_sectors.get(sector_name)
-    if bk:
-        logger.info("eastmoney: auto-discovered BK for %s (%s) → %s", sw_code, sector_name, bk)
-        SW_TO_BK[sw_code] = bk  # 缓存到静态映射
-    return bk
+def _find_bk_code(sw_code: str) -> Optional[str]:
+    """查找申万代码对应的东方财富 BK 代码。"""
+    return SW_TO_BK.get(sw_code)
 
 
 # ============================================================
@@ -234,7 +147,7 @@ def fund_flow(pt_codes: List[str], raw: bool = True,
         sector_name = names.get(pt, "") if names else ""
 
         # 查 BK 代码
-        bk = _find_bk_code(sw, sector_name)
+        bk = _find_bk_code(sw)
         if not bk:
             logger.debug("eastmoney: no BK code for %s (%s)", pt, sector_name)
             continue
