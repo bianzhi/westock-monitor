@@ -79,11 +79,19 @@ export default function CompareChart({ series = [], mode = "minute", title = "�
         name: isCumulative ? "当日累计净流入(亿)" : "本分钟净流入(亿)",
         splitLine: { lineStyle: { type: "dashed", color: "#e0e0e0" } },
       },
-      series: series.map((s, idx) => ({
+      series: series.map((s, idx) => {
+        const validPoints = (s.points || []).filter((p) => {
+          if (isCumulative) return p.main_net_flow != null;
+          return !p.is_open_anchor && p.minute_delta != null;
+        });
+        // 数据点 ≤5 时显示圆点标记，否则隐藏（点太多会遮盖折线）
+        const showSymbol = validPoints.length <= 5;
+        return {
         name: s.name,
         type: "line",
         smooth: false,
-        symbol: "none",
+        symbol: showSymbol ? "circle" : "none",
+        symbolSize: showSymbol ? 5 : 0,
         lineStyle: { width: 2, color: COLORS[idx % COLORS.length] },
         itemStyle: { color: COLORS[idx % COLORS.length] },
         connectNulls: isCumulative,  // 累计模式连接 null 点，画连续折线
@@ -99,7 +107,8 @@ export default function CompareChart({ series = [], mode = "minute", title = "�
           const ts = new Date(p.timestamp).getTime();
           return [ts, Number(p.minute_delta) / 1e8];
         }),
-      })),
+      }
+    }),
     };
   }, [series, mode, title]);
 
