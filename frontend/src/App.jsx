@@ -36,7 +36,7 @@ export default function App() {
   const [lastUpdate, setLastUpdate] = useState("");
   const [searchText, setSearchText] = useState("");
   const searchTimer = useRef(null);
-  const [activeTab, setActiveTab] = useState("l2");
+  const [activeTab, setActiveTab] = useState("concept");
   const [l1Data, setL1Data] = useState([]);
   const [l1Loading, setL1Loading] = useState(false);
   const l1LoadedN = useRef(null);  // 记录上次加载的 n 值，避免重复请求
