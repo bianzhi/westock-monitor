@@ -207,7 +207,7 @@ if $USE_SYSTEMD; then
     echo "🚀 安装 systemd 服务..."
     cp "$SERVICE_FILE" /etc/systemd/system/westock-monitor.service
     sed -i "s|WorkingDirectory=.*|WorkingDirectory=$PROJECT_DIR|" /etc/systemd/system/westock-monitor.service
-    sed -i "s|ExecStart=.*|ExecStart=$VENV_PYTHON -m uvicorn app:app --host 0.0.0.0 --port 8200 --workers 4|" /etc/systemd/system/westock-monitor.service
+    sed -i "s|ExecStart=.*|ExecStart=$VENV_PYTHON -m uvicorn app:app --host 0.0.0.0 --port 8200|" /etc/systemd/system/westock-monitor.service
     sed -i "s|Environment=PATH=.*|Environment=PATH=$PROJECT_DIR/.venv/bin:/usr/local/bin:/usr/bin:/bin|" /etc/systemd/system/westock-monitor.service
     sed -i "s|StandardOutput=.*|StandardOutput=append:$LOGDIR/backend.log|" /etc/systemd/system/westock-monitor.service
     sed -i "s|StandardError=.*|StandardError=append:$LOGDIR/backend.log|" /etc/systemd/system/westock-monitor.service
@@ -218,7 +218,7 @@ if $USE_SYSTEMD; then
 else
     echo ""
     echo "🚀 启动后端 (nohup, 端口 8200)..."
-    nohup "$VENV_PYTHON" -m uvicorn app:app --host 0.0.0.0 --port 8200 --workers 4 \
+    nohup "$VENV_PYTHON" -m uvicorn app:app --host 0.0.0.0 --port 8200 \
         > "$LOGDIR/backend.log" 2>&1 &
     BACKEND_PID=$!
     echo "   PID: $BACKEND_PID"
