@@ -21,7 +21,7 @@
 import json
 import subprocess
 import logging
-from typing import Any, List, Dict, Optional, Union
+from typing import Any, List, Dict, Optional, Union, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import (
@@ -307,14 +307,24 @@ def extract_main_inflow_circ_rate(record: Dict) -> Optional[float]:
 # 便捷函数：从 fund_flow 结果提取关键字段
 # ============================================================
 def extract_main_net_flow(record: Dict) -> Optional[float]:
-    """从 fund flow 单条记录提取 MainNetFlow，转 float。"""
+    """从 fund flow 单条记录提取 MainNetFlow，转 float。
+    MainNetFlow 缺失时降级为 MainInFlow - MainOutFlow。
+    """
     v = record.get("MainNetFlow")
-    if v is None:
-        return None
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
+    if v is not None and v != "":
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            pass
+    # 降级：用主力买卖差近似
+    inf = record.get("MainInFlow")
+    outf = record.get("MainOutFlow")
+    if inf is not None and outf is not None:
+        try:
+            return float(inf) - float(outf)
+        except (TypeError, ValueError):
+            pass
+    return None
 
 
 def extract_main_inflow(record: Dict) -> Optional[float]:

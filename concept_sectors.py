@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 """腾讯自选股概念板块清单模块。
 
-concept sector codes are exclusively `pt02xxxxxx` (non-GN prefix).
-pt02GN codes are NOT supported by fund_flow — only pt0200 / pt021 / pt022 are.
+concept sector codes 有 pt02 数字前缀和 pt02GN 前缀两种格式。
 本模块维护一份已验证可用的概念板块代码清单，支持动态补充和缓存。
 """
 

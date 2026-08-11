@@ -263,7 +263,7 @@ def calc_sector_strength(
 # 工具
 # ============================================================
 def _to_float(v: Any) -> Optional[float]:
-    if v is None:
+    if v is None or v == "":
         return None
     try:
         f = float(v)
