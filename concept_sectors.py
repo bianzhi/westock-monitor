@@ -8,7 +8,7 @@ concept sector codes 有 pt02 数字前缀和 pt02GN 前缀两种格式。
 
 import json
 import logging
-from typing import Dict, List
+from typing import Any, Dict, List
 from config import DATA_DIR
 
 logger = logging.getLogger(__name__)
