@@ -33,7 +33,7 @@ def dget(d, k, default=0):
     return d.get(k, default) if isinstance(d, dict) else default
 
 def get(path):
-    resp = requests.get(f"{BASE_URL}{path}", timeout=60)
+    resp = requests.get(f"{BASE_URL}{path}", timeout=120)
     try:
         return resp.status_code, resp.json()
     except Exception as e:
