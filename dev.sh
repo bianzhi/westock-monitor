@@ -38,7 +38,15 @@ echo "🔪 检查并杀掉旧服务..."
 
 _kill_port() {
     local port="$1"
-    local pids=$(lsof -ti ":$port" 2>/dev/null || true)
+    local pids=""
+    # lsof 在某些服务器上会卡住，用 timeout 保护，失败则 fuser 兜底
+    pids=$(timeout 3 lsof -ti ":$port" 2>/dev/null || true)
+    if [ -z "$pids" ] && command -v fuser &>/dev/null; then
+        pids=$(timeout 3 fuser "$port/tcp" 2>/dev/null | tr -d ' ' || true)
+    fi
+    if [ -z "$pids" ] && command -v ss &>/dev/null; then
+        pids=$(timeout 3 ss -tlpn "sport = :$port" 2>/dev/null | grep -oP 'pid=\K\d+' | tr '\n' ' ' || true)
+    fi
     [ -z "$pids" ] && return 1
     echo "   端口 $port → PID $pids"
     kill $pids 2>/dev/null || true
