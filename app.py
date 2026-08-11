@@ -760,6 +760,29 @@ async def get_sector_minute(
         trade_date = date.today().strftime("%Y%m%d")
 
     deltas = storage.get_minute_deltas(code, trade_date)
+
+    # 概念板块：无分钟采集数据，fund_flow 实时快照兜底
+    if not deltas and code.startswith("pt02"):
+        try:
+            from westock import fund_flow as _ff, extract_main_net_flow as _emnf
+            flow_records = _ff([code], raw=True)
+            if flow_records:
+                flow = flow_records[0]
+                mnf = _emnf(flow)
+                now_ts = datetime.now()
+                deltas = [{
+                    "timestamp": now_ts.isoformat(),
+                    "main_net_flow": mnf,
+                    "minute_delta": 0,
+                    "turnover": None,
+                    "turnover_delta": None,
+                    "is_open_anchor": 0,
+                    "circ_mv": None,
+                    "main_inflow": None,
+                    "main_outflow": None,
+                }]
+        except Exception as e:
+            logger.debug("get_sector_minute concept fallback failed: %s", e)
     meta = storage.get_sector_meta(code)
 
     points = []
