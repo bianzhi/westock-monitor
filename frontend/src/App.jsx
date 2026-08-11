@@ -2,10 +2,11 @@ import React, { useEffect, useState, useCallback, useRef, useMemo } from "react"
 import {
   Layout, Table, Button, Input, Select, Card, Row, Col, Statistic,
   message, Space, Modal, Descriptions, Spin, Tabs, Switch, InputNumber,
+  Tooltip, Badge, Drawer,
 } from "antd";
 import {
   ReloadOutlined, PlayCircleOutlined, ThunderboltOutlined,
-  ArrowUpOutlined, ArrowDownOutlined,
+  ArrowUpOutlined, ArrowDownOutlined, ApiOutlined, WarningOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
 
@@ -18,7 +19,8 @@ import { MinuteChart, DailyHistoryChart, NetRateCompareChart } from "./Charts";
 import SectorDetail from "./SectorDetail";
 import L1Tab from "./L1Tab";
 import CompareChart from "./CompareChart";
-import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect, fetchUserPrefs, saveUserPrefs, fetchConceptSectors, fetchErrors } from "./api";
+import AlertsTab from "./AlertsTab";
+import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect, fetchUserPrefs, saveUserPrefs, fetchConceptSectors, fetchErrors, fetchWatchlist, addWatchlist, removeWatchlist, refreshConcepts } from "./api";
 import AuthGuard from "./components/AuthGuard";
 
 const { Header, Content, Footer } = Layout;
@@ -46,9 +48,62 @@ export default function App() {
   const [conceptSectors, setConceptSectors] = useState([]);
   const [conceptLoading, setConceptLoading] = useState(false);
 
-  // 错误日志
+  // 自选板块（watchlist）—— 登录走 Supabase，未登录走 localStorage
+  const [watchlist, setWatchlist] = useState([]);
+  const watchlistLoadedRef = useRef(false);
+  const [watchlistUserId, setWatchlistUserId] = useState(null);
+
+  const loadWatchlist = useCallback(async () => {
+    try {
+      const data = await fetchWatchlist();
+      if (data.user_id) {
+        setWatchlistUserId(data.user_id);
+        setWatchlist(data.watchlist || []);
+      } else {
+        // 未登录：从 localStorage 恢复
+        setWatchlistUserId(null);
+        const local = JSON.parse(localStorage.getItem("westock_watchlist") || "[]");
+        setWatchlist(Array.isArray(local) ? local : []);
+      }
+      watchlistLoadedRef.current = true;
+    } catch (e) {
+      // supabase 未配置：静默降级 localStorage
+      setWatchlistUserId(null);
+      const local = JSON.parse(localStorage.getItem("westock_watchlist") || "[]");
+      setWatchlist(Array.isArray(local) ? local : []);
+      watchlistLoadedRef.current = true;
+    }
+  }, []);
+
+  const toggleWatchlist = useCallback(async (code, isAdd) => {
+    let next;
+    if (isAdd) {
+      next = [...watchlist, code];
+    } else {
+      next = watchlist.filter((c) => c !== code);
+    }
+    setWatchlist(next);  // 乐观更新
+    try {
+      if (watchlistUserId) {
+        if (isAdd) {
+          await addWatchlist([code]);
+        } else {
+          await removeWatchlist([code]);
+        }
+      } else {
+        localStorage.setItem("westock_watchlist", JSON.stringify(next));
+      }
+    } catch (e) {
+      message.error("自选保存失败: " + (e.response?.data?.detail || e.message));
+      // 回滚
+      setWatchlist(watchlist);
+    }
+  }, [watchlist, watchlistUserId]);
+
+  // 错误日志（开发者诊断，从主 Tab 降级到 Header 抽屉）
   const [errorLogs, setErrorLogs] = useState([]);
   const [errorLoading, setErrorLoading] = useState(false);
+  const [errorDrawerOpen, setErrorDrawerOpen] = useState(false);
 
   const loadErrors = useCallback(async () => {
     setErrorLoading(true);
@@ -102,25 +157,51 @@ export default function App() {
 
   const comparePrefsSaveRef = useRef(null);
 
-  // 加载用户偏好（恢复 m/n）
+  // 加载用户偏好（恢复 m/n）—— 登录走 Supabase，未登录走 localStorage
   useEffect(() => {
     fetchUserPrefs().then((data) => {
       const prefs = data?.prefs || {};
+      // 未登录或 supabase 未配置：从 localStorage 恢复
+      if (!data?.user_id && Object.keys(prefs).length === 0) {
+        try {
+          const local = JSON.parse(localStorage.getItem("westock_prefs") || "{}");
+          if (local.compare_start != null) setCompareStart(local.compare_start);
+          if (local.compare_end != null) setCompareEnd(local.compare_end);
+          if (local.compare_method) setCompareMethod(local.compare_method);
+        } catch (e) { /* ignore */ }
+        return;
+      }
       if (prefs.compare_start != null) setCompareStart(prefs.compare_start);
       if (prefs.compare_end != null) setCompareEnd(prefs.compare_end);
       if (prefs.compare_method) setCompareMethod(prefs.compare_method);
-    }).catch(() => {});
+    }).catch(() => {
+      // supabase 未配置：静默降级 localStorage
+      try {
+        const local = JSON.parse(localStorage.getItem("westock_prefs") || "{}");
+        if (local.compare_start != null) setCompareStart(local.compare_start);
+        if (local.compare_end != null) setCompareEnd(local.compare_end);
+        if (local.compare_method) setCompareMethod(local.compare_method);
+      } catch (e) { /* ignore */ }
+    });
   }, []);
 
-  // 自动保存 m/n 到用户偏好（2s 防抖）
+  // 自动保存 m/n 到用户偏好（2s 防抖）—— 登录走 Supabase，未登录走 localStorage
   useEffect(() => {
     if (comparePrefsSaveRef.current) clearTimeout(comparePrefsSaveRef.current);
     comparePrefsSaveRef.current = setTimeout(() => {
-      saveUserPrefs({
+      const payload = {
         compare_start: compareStart,
         compare_end: compareEnd,
         compare_method: compareMethod,
-      }).catch(() => {});
+      };
+      saveUserPrefs(payload).catch(() => {
+        // 未登录或 supabase 未配置：降级 localStorage
+        try {
+          const local = JSON.parse(localStorage.getItem("westock_prefs") || "{}");
+          Object.assign(local, payload);
+          localStorage.setItem("westock_prefs", JSON.stringify(local));
+        } catch (e) { /* ignore */ }
+      });
     }, 2000);
   }, [compareStart, compareEnd, compareMethod]);
 
@@ -188,15 +269,29 @@ export default function App() {
     setLoading(false);
   }, [n]);
 
-  // 健康检查
+  // 健康检查 + 盘中宽表 dirty-flag 自动刷新
+  // 后台每 60s 刷一次缓存（data_cache），前端 30s 轮询 health 拿 cache_updated；
+  // 若 cache_updated 变化（后台有新数据入库）则触发 loadSectors，无需用户手动刷新。
+  // 静态字段 lastCacheUpdatedRef 跨轮询保持，比对新旧值判定 dirty。
+  const lastCacheUpdatedRef = useRef("");
+
   const loadHealth = useCallback(async () => {
     try {
       const h = await fetchHealth();
       setHealth(h);
+      // dirty-flag：cache_updated 变化 → 触发宽表刷新
+      const newUpdated = h?.cache_updated || "";
+      if (newUpdated && newUpdated !== lastCacheUpdatedRef.current) {
+        lastCacheUpdatedRef.current = newUpdated;
+        // 仅在宽表类 Tab 活跃时刷新，避免切走时无谓请求
+        if (activeTab === "l2" || activeTab === "concept") {
+          loadSectors(false);
+        }
+      }
     } catch (e) {
       // ignore
     }
-  }, []);
+  }, [activeTab, loadSectors]);
 
   // 行展开：加载单板块分钟级
   const loadDetail = useCallback(async (code) => {
@@ -223,9 +318,10 @@ export default function App() {
   useEffect(() => {
     loadSectors();
     loadHealth();
+    loadWatchlist();  // 自选板块加载（登录走 Supabase，未登录走 localStorage）
     const t = setInterval(loadHealth, 30000);
     return () => clearInterval(t);
-  }, [loadSectors, loadHealth]);
+  }, [loadSectors, loadHealth, loadWatchlist]);
 
   // n 切换时自动刷新已展开的详情
   useEffect(() => {
@@ -233,6 +329,22 @@ export default function App() {
       loadDetail(detailCode);
     }
   }, [n]);
+
+  // 行展开期间分钟图自动续命：detailCode 就绪且交易中时 60s 轮询重拉 minuteData
+  // 盯盘场景：展开某板块后曲线持续生长，无需收起再展开
+  useEffect(() => {
+    if (!detailCode) return;
+    const timer = setInterval(() => {
+      // 仅交易中才续命，非交易时段停转避免无谓请求
+      if (health?.trading) {
+        const today = dayjs().format("YYYYMMDD");
+        fetchSectorMinute(detailCode, today)
+          .then((m) => setMinuteData(m))
+          .catch(() => {});
+      }
+    }, 60000);
+    return () => clearInterval(timer);
+  }, [detailCode, health?.trading]);
 
   // 加载一级行业聚合数据
   const loadL1Summary = useCallback(async () => {
@@ -260,8 +372,36 @@ export default function App() {
     }
   }, [activeTab, loadL1Summary, loadConceptSectors, conceptSectors.length]);
 
+  // 自选置顶排序：watchlist 里的板块排前面，顺序同 watchlist；其余原序
+  const sectorsSorted = useMemo(() => {
+    if (!watchlist.length) return sectors;
+    const inW = (c) => watchlist.includes(c);
+    const starred = sectors.filter((s) => inW(s.code));
+    const rest = sectors.filter((s) => !inW(s.code));
+    return [...starred, ...rest];
+  }, [sectors, watchlist]);
+
   // 表格列定义（useMemo 避免每次渲染重建引用导致 Table 闪烁）
+  // watchlist 进 deps：勾选状态变了列渲染要更新；置顶排序在 dataSource 处理
   const columns = useMemo(() => [
+    {
+      title: "★",
+      key: "watch",
+      fixed: "left",
+      width: 45,
+      render: (_, record) => {
+        const inW = watchlist.includes(record.code);
+        return (
+          <a
+            title={inW ? "取消自选" : "加入自选（置顶）"}
+            onClick={(e) => { e.stopPropagation(); toggleWatchlist(record.code, !inW); }}
+            style={{ fontSize: 16, color: inW ? "#f39c12" : "#ccc", fontWeight: inW ? 700 : 400 }}
+          >
+            {inW ? "★" : "☆"}
+          </a>
+        );
+      },
+    },
     {
       title: "板块名称",
       dataIndex: "name",
@@ -351,7 +491,16 @@ export default function App() {
       key: "sum5_rate",
       width: 110,
       sorter: (a, b) => (a.summary_5d?.net_rate ?? -999) - (b.summary_5d?.net_rate ?? -999),
-      render: (_, r) => <NetRateText value={r.summary_5d?.net_rate} />,
+      render: (_, r) => (
+        <Space size={2}>
+          <NetRateText value={r.summary_5d?.net_rate} />
+          {r.estimated && (
+            <Tooltip title="缓存空仅今日 fallback，非真多日累加（盘后服务运行后会消失）">
+              <span style={{ fontSize: 10, color: "#f39c12", border: "1px dashed #f39c12", borderRadius: 3, padding: "0 2px" }}>估</span>
+            </Tooltip>
+          )}
+        </Space>
+      ),
     },
     {
       title: "强度判定",
@@ -397,6 +546,40 @@ export default function App() {
               { value: 20, label: "n=20" },
             ]}
           />
+          <Tooltip
+            title={
+              health?.data_sources
+                ? Object.entries(health.data_sources).map(([k, v]) => (
+                    <div key={k}>
+                      <b>{k}</b>:{" "}
+                      <span style={{ color: v.status === "ok" ? "#27ae60" : v.status === "degraded" || v.status === "skip" ? "#f39c12" : "#e74c3c" }}>
+                        {v.status}
+                      </span>
+                      {v.version ? ` v=${v.version}` : ""}
+                      {v.scope ? ` scope=${v.scope}` : ""}
+                      {v.note ? ` · ${v.note}` : ""}
+                      {v.error ? ` · err: ${v.error}` : ""}
+                    </div>
+                  ))
+                : "数据源状态加载中..."
+            }
+          >
+            <Badge
+              offset={[-4, 4]}
+              dot
+              status={
+                !health?.data_sources
+                  ? "default"
+                  : Object.values(health.data_sources).some((v) => v.status === "fail")
+                  ? "error"
+                  : Object.values(health.data_sources).some((v) => v.status === "degraded" || v.status === "skip")
+                  ? "warning"
+                  : "success"
+              }
+            >
+              <ApiOutlined style={{ fontSize: 18 }} />
+            </Badge>
+          </Tooltip>
           <Button icon={<ReloadOutlined />} onClick={() => loadSectors(true)} loading={loading}>
             刷新
           </Button>
@@ -417,7 +600,17 @@ export default function App() {
             onClick={async () => {
               try {
                 const r = await refreshSectors();
-                message.success(`已刷新 ${r.sectors_count} 个板块`);
+                // 展示 diff：新增/剔除感知，让用户知道清单变更
+                const added = r.added?.length || 0;
+                const removed = r.removed?.length || 0;
+                if (added || removed) {
+                  message.success(
+                    `已刷新 ${r.sectors_count} 个板块（新增 ${added} / 剔除 ${removed}）`,
+                    8
+                  );
+                } else {
+                  message.success(`已刷新 ${r.sectors_count} 个板块（清单无变更）`);
+                }
                 loadSectors();
               } catch (e) {
                 message.error("刷新失败: " + e.message);
@@ -426,8 +619,71 @@ export default function App() {
           >
             刷新板块列表
           </Button>
+          <Button
+            onClick={async () => {
+              try {
+                const r = await refreshConcepts("");
+                message.success(`已补全概念板块：新增 ${r.added?.length || 0} 个，总计 ${r.total_after}`);
+                loadConceptSectors();  // 刷新前端宽表
+              } catch (e) {
+                message.error("刷新概念板块失败: " + (e.response?.data?.detail || e.message));
+              }
+            }}
+          >
+            刷新概念
+          </Button>
+          <Tooltip
+            title={
+              errorLogs.length > 0
+                ? `${errorLogs.length} 条错误/警告（开发者诊断）`
+                : "无错误日志（开发者诊断）"
+            }
+          >
+            <Badge
+              count={errorLogs.length}
+              size="small"
+              offset={[-2, 2]}
+              status={errorLogs.some((e) => e.level === "ERROR" || e.level === "CRITICAL") ? "error" : "warning"}
+            >
+              <WarningOutlined
+                style={{ fontSize: 18, cursor: "pointer", color: errorLogs.length > 0 ? "#f39c12" : "#95a5a6" }}
+                onClick={() => {
+                  setErrorDrawerOpen(true);
+                  if (errorLogs.length === 0) loadErrors();
+                }}
+              />
+            </Badge>
+          </Tooltip>
         </Space>
       </Header>
+
+      <Drawer
+        title="服务错误日志（开发者诊断面板）"
+        placement="right"
+        width={620}
+        open={errorDrawerOpen}
+        onClose={() => setErrorDrawerOpen(false)}
+        extra={<Button size="small" onClick={loadErrors} loading={errorLoading}>刷新</Button>}
+      >
+        <Table
+          rowKey={(_, i) => i}
+          dataSource={errorLogs}
+          size="small"
+          loading={errorLoading}
+          pagination={{ pageSize: 50, showSizeChanger: false }}
+          columns={[
+            { title: "时间", dataIndex: "time", key: "time", width: 180 },
+            {
+              title: "级别", dataIndex: "level", key: "level", width: 80,
+              render: (v) => {
+                const color = v === "ERROR" || v === "CRITICAL" ? "#e74c3c" : "#f39c12";
+                return <span style={{ color, fontWeight: "bold" }}>{v}</span>;
+              },
+            },
+            { title: "消息", dataIndex: "msg", key: "msg", ellipsis: true },
+          ]}
+        />
+      </Drawer>
 
       <Content className="app-container">
         <Tabs
@@ -488,7 +744,7 @@ export default function App() {
                     <Table
                       rowKey="code"
                       columns={columns}
-                      dataSource={sectors}
+                      dataSource={sectorsSorted}
                       loading={loading}
                       size="small"
                       scroll={{ x: 1400 }}
@@ -518,6 +774,12 @@ export default function App() {
                   l1Data={l1Data}
                   l1Loading={l1Loading}
                   onSwitchToSector={(s) => { setActiveTab("l2"); setSearch(s.name); setTimeout(() => loadDetail(s.code), 100); }}
+                  onDrillDownL1={(record) => {
+                    // 宏观下钻：点一级行业名 → 切 l2 + 筛选该行业名（行业名即二级板块名前缀）
+                    setActiveTab("l2");
+                    setSearch(record.l1_name);
+                    setSearchText(record.l1_name);
+                  }}
                 />
               ),
             },
@@ -649,29 +911,9 @@ export default function App() {
               ),
             },
             {
-              key: "errors",
-              label: `错误日志 (${errorLogs.length})`,
-              children: (
-                <Card title="服务错误日志" extra={<Button size="small" onClick={loadErrors} loading={errorLoading}>刷新</Button>}>
-                  <Table
-                    rowKey={(_, i) => i}
-                    dataSource={errorLogs}
-                    size="small"
-                    pagination={{ pageSize: 50, showSizeChanger: false }}
-                    columns={[
-                      { title: "时间", dataIndex: "time", key: "time", width: 180 },
-                      {
-                        title: "级别", dataIndex: "level", key: "level", width: 80,
-                        render: (v) => {
-                          const color = v === "ERROR" || v === "CRITICAL" ? "#e74c3c" : "#f39c12";
-                          return <span style={{ color, fontWeight: "bold" }}>{v}</span>;
-                        },
-                      },
-                      { title: "消息", dataIndex: "msg", key: "msg", ellipsis: true },
-                    ]}
-                  />
-                </Card>
-              ),
+              key: "alerts",
+              label: `档位告警`,
+              children: <AlertsTab />,
             },
           ]}
         />

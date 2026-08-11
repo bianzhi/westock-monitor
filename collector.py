@@ -87,17 +87,19 @@ def get_storage():
 # ============================================================
 # 板块列表刷新
 # ============================================================
-def refresh_sectors() -> int:
-    """从接口刷新板块列表，写入 data/sectors.json。
+def refresh_sectors() -> Dict[str, Any]:
+    """从接口刷新板块列表，写入 data/sectors.json，并返回 diff（新增/剔除）。
 
     策略：
       1. 遍历 31 个一级行业名，调 search --type sector
       2. 过滤 分类="申万二级行业清单" 的条目
       3. 合并去重，按代码排序
       4. 失败兜底用 DEFAULT_SECTORS
+      5. 与旧缓存对比，算出 added/removed（板块清单变更感知 E1）
 
     Returns:
-        刷新后的板块数量
+      {"sectors_count": N, "added": [...], "removed": [...], "source": str}
+      其中 added/removed 是 [{code, name}, ...]，便于前端展示"新增 X 个 / 剔剔除 Y 个"
     """
     logger.info("refresh_sectors: 开始从接口拉取板块列表")
 
@@ -127,10 +129,33 @@ def refresh_sectors() -> int:
         except Exception as e:
             logger.warning("refresh_sectors search %s failed: %s", l1, e)
 
+    # 读旧缓存算 diff
+    old_codes: set = set()
+    old_name_map: Dict[str, str] = {}
+    try:
+        if SECTORS_CACHE.exists():
+            with open(SECTORS_CACHE, "r", encoding="utf-8") as f:
+                old_data = json.load(f)
+            for s in old_data.get("sectors", []):
+                old_codes.add(s.get("code"))
+                old_name_map[s.get("code")] = s.get("name", "")
+    except Exception as e:
+        logger.warning("refresh_sectors: 读旧缓存失败，跳过 diff: %s", e)
+
+    new_codes = set(found.keys())
+    added_codes = new_codes - old_codes
+    removed_codes = old_codes - new_codes
+    added = [{"code": c, "name": found[c]["name"]} for c in sorted(added_codes)]
+    removed = [{"code": c, "name": old_name_map.get(c, c)} for c in sorted(removed_codes)]
+    if added or removed:
+        logger.info("refresh_sectors: diff detected — added=%d, removed=%d",
+                    len(added), len(removed))
+
     # 兜底：如果接口失败，用默认列表
     if not found:
         logger.warning("refresh_sectors: 接口未返回数据，使用默认列表")
         sectors_data = {"sectors": DEFAULT_SECTORS, "updated_at": datetime.now().isoformat(), "source": "default"}
+        source = "default"
     else:
         sectors_list = sorted(found.values(), key=lambda x: x["code"])
         sectors_data = {
@@ -139,6 +164,7 @@ def refresh_sectors() -> int:
             "source": "tencent_api",
             "count": len(sectors_list),
         }
+        source = "tencent_api"
 
     try:
         with open(SECTORS_CACHE, "w", encoding="utf-8") as f:
@@ -146,9 +172,14 @@ def refresh_sectors() -> int:
         logger.info("refresh_sectors: 完成，共 %d 个板块", len(sectors_data.get("sectors", [])))
     except Exception as e:
         logger.error("refresh_sectors: 写入缓存失败: %s", e)
-        return 0
+        return {"sectors_count": 0, "added": [], "removed": [], "source": source}
 
-    return len(sectors_data.get("sectors", []))
+    return {
+        "sectors_count": len(sectors_data.get("sectors", [])),
+        "added": added,
+        "removed": removed,
+        "source": source,
+    }
 
 
 def load_sectors() -> List[Dict]:
@@ -684,17 +715,45 @@ def run_collector_loop(force: bool = False) -> None:
     backoff = 0          # 连续限流次数
     cycle = 0            # 周期计数（用于定期补采全量）
     FULL_EVERY_N = 7     # 每 N 个聚焦周期补采一次全量（7×8s≈56s）
+    # 盘后修正窗口去重：按 date 标记，跨日重置（每日 15:00-15:30 仅补采一次）
+    fired_after_close_date: str = ""
+    fired_after_close: bool = False
 
     while True:
         now = datetime.now()
+        today_str = now.strftime("%Y%m%d")
+        # 跨日重置盘后修正标记
+        if fired_after_close_date != today_str:
+            fired_after_close_date = today_str
+            fired_after_close = False
         trading = is_trading_time(now)
 
         if not trading and not force:
-            # 收盘后采集概念板块日快照（每天仅一次）
-            try:
-                collect_concept_daily_snapshot()
-            except Exception as e:
-                logger.warning("concept_daily_snapshot error: %s", e)
+            # 盘后修正窗口：15:00-15:30 间继续采一次分钟快照，
+            # 捕捉 A 股收盘后主力净流入的小幅修正（实测盘后会有纠正值）。
+            # 用 fired_after_close 去重，30 分钟窗口内只补一次。
+            hour = now.hour
+            minute = now.minute
+            if hour == 15 and minute <= 30 and not fired_after_close:
+                try:
+                    result = collect_minute_snapshot()
+                    logger.info("collector: post-close correction snapshot: %s", result)
+                    fired_after_close = True
+                except Exception as e:
+                    logger.warning("collector post-close snapshot error: %s", e)
+
+            # 收盘后采集概念板块日快照（每天仅一次，幂等）
+            # 触发窗口收紧到 15:00-23:59：避免盘前 09:00 前误触；函数内
+            # 按 trade_date 去重，多次调用也只写一次。盘后若服务已停，
+            # 次日开盘后 09:30 第一帧会补采昨日——但为保近3日真实数据
+            # 不中断，建议盘后保留服务运行至少至快照完成（见 dev.sh）。
+            if hour >= 15:
+                try:
+                    result = collect_concept_daily_snapshot()
+                    if result and not result.get("skipped"):
+                        logger.info("concept_daily_snapshot done: %s", result)
+                except Exception as e:
+                    logger.warning("concept_daily_snapshot error: %s", e)
             time.sleep(IDLE_SLEEP)
             backoff = 0
             cycle = 0

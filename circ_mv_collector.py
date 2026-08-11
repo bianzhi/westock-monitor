@@ -98,6 +98,31 @@ def _get_tushare_pro():
     return _tushare_pro
 
 
+def _ping_tushare() -> Tuple[bool, str]:
+    """活性探测：验证 Tushare token + 接口可用性，返回 (ok, scope)。
+
+    scope:
+      - "full"    —— token + daily_basic 可用（流通市值主方案就绪）
+      - "token"   —— token 已配置但 daily_basic 调用失败（接口降级）
+      - "missing" —— token 未配置（降级 westock 反推，精度 ±20%）
+    用于 /api/health 数据源活性体检。
+    """
+    pro = _get_tushare_pro()
+    if pro is None:
+        return False, "missing"
+    try:
+        # 用最近一个交易日 ping 一行，验证接口权限与可达
+        from trading_calendar import get_previous_trading_day
+        d = get_previous_trading_day()
+        df = pro.daily_basic(trade_date=d, fields="ts_code,trade_date,circ_mv")
+        if df is not None and not df.empty:
+            return True, "full"
+        return False, "token"
+    except Exception as e:
+        logger.warning("_ping_tushare daily_basic failed: %s", e)
+        return False, "token"
+
+
 def _westock_to_tushare(wcode: str) -> str:
     """westock 个股代码 → Tushare 个股代码。
 

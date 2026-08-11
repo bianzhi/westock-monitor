@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
 # ============================================================
 # Westock Monitor 一键启动脚本（唯一入口）
+# ============================================================
 # 用法:
-#   ./dev.sh          # 编译前端 + 启动后端(8200)
-#   ./dev.sh kill     # 停止服务
-#   ./dev.sh --build  # 强制重新编译前端
+#   ./dev.sh                  # 开发模式：nohup 跑后端，不做 systemd 注册
+#   ./dev.sh --prod           # 生产模式：注册 systemd 服务（需 root / sudo）
+#   ./dev.sh --build          # 强制重新编译前端
+#   ./dev.sh kill             # 停止服务（systemd 与 nohup 都清理）
+#   ./dev.sh --help / -h      # 显示本帮助
 #
-# 自动适配 systemd（生产）与 nohup（开发），无需其他脚本。
+# 默认开发模式与生产模式互斥；--prod 时才允许 cp service 文件到
+# /etc/systemd/system/ 并 systemctl enable，避免开发调试意外注册
+# 生产服务导致下次开机自启。
 # ============================================================
 set -e
+
+_show_help() {
+    sed -n '3,14p' "$0"
+    exit 0
+}
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_DIR"
@@ -16,6 +26,7 @@ VENV_PYTHON="$PROJECT_DIR/.venv/bin/python3"
 LOGDIR="$PROJECT_DIR/logs"
 SERVICE_FILE="$PROJECT_DIR/westock-monitor.service"
 USE_SYSTEMD=false
+PROD_MODE=false
 
 KILL_ONLY=false
 FORCE_BUILD=false
@@ -23,6 +34,9 @@ for arg in "$@"; do
     case "$arg" in
         kill) KILL_ONLY=true ;;
         --build) FORCE_BUILD=true ;;
+        --prod) PROD_MODE=true ;;
+        --help|-h) _show_help ;;
+        *) echo "⚠️  未知参数: $arg（./dev.sh --help 查看用法）" >&2; exit 2 ;;
     esac
 done
 
@@ -210,9 +224,9 @@ cd "$PROJECT_DIR"
 # ----------------------------------------------------------
 mkdir -p "$LOGDIR"
 
-if $USE_SYSTEMD; then
+if $USE_SYSTEMD && $PROD_MODE; then
     echo ""
-    echo "🚀 安装 systemd 服务..."
+    echo "🚀 安装 systemd 服务（生产模式）..."
     cp "$SERVICE_FILE" /etc/systemd/system/westock-monitor.service
     sed -i "s|WorkingDirectory=.*|WorkingDirectory=$PROJECT_DIR|" /etc/systemd/system/westock-monitor.service
     sed -i "s|ExecStart=.*|ExecStart=$VENV_PYTHON -m uvicorn app:app --host 0.0.0.0 --port 8200|" /etc/systemd/system/westock-monitor.service
@@ -222,7 +236,15 @@ if $USE_SYSTEMD; then
     systemctl daemon-reload
     systemctl enable westock-monitor
     systemctl start westock-monitor
-    echo "   systemd 服务已启动"
+    echo "   systemd 服务已启动（enable 已开，下次开机自启）"
+elif $USE_SYSTEMD && ! $PROD_MODE; then
+    echo ""
+    echo "🚀 启动后端 (nohup, 端口 8200) — 开发模式，跳过 systemd 注册"
+    echo "    （如需生产部署加 --prod，才会注册并 enable 开机自启）"
+    nohup "$VENV_PYTHON" -m uvicorn app:app --host 0.0.0.0 --port 8200 \
+        > "$LOGDIR/backend.log" 2>&1 &
+    BACKEND_PID=$!
+    echo "   PID: $BACKEND_PID"
 else
     echo ""
     echo "🚀 启动后端 (nohup, 端口 8200)..."

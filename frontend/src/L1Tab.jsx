@@ -4,9 +4,11 @@ import { StrengthTag, NetFlowText, NetRateText } from "./ui";
 
 /**
  * 一级行业聚合视图
- * props: l1Data, l1Loading, onSwitchToSector
+ * props: l1Data, l1Loading, onSwitchToSector, onDrillDownL1
+ *   - onSwitchToSector(sec)：点"最强二级板块"列的板块名 → 切 l2 + 加载详情
+ *   - onDrillDownL1(record)：点一级行业名本身 → 切 l2 + 筛选该行业（宏观下钻）
  */
-export default function L1Tab({ l1Data, l1Loading, onSwitchToSector }) {
+export default function L1Tab({ l1Data, l1Loading, onSwitchToSector, onDrillDownL1 }) {
   const l1Columns = [
     {
       title: "一级行业",
@@ -15,6 +17,15 @@ export default function L1Tab({ l1Data, l1Loading, onSwitchToSector }) {
       fixed: "left",
       width: 130,
       sorter: (a, b) => a.l1_name.localeCompare(b.l1_name),
+      render: (text, record) => (
+        <a
+          title={`点下钻：切到二级板块 Tab 并筛选「${text}」行业`}
+          onClick={() => onDrillDownL1 && onDrillDownL1(record)}
+          style={{ fontWeight: 600 }}
+        >
+          {text}
+        </a>
+      ),
     },
     { title: "板块数", dataIndex: "sector_count", key: "count", width: 70, sorter: (a, b) => a.sector_count - b.sector_count },
     {

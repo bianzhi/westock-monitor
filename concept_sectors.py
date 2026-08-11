@@ -695,3 +695,35 @@ def get_default_codes() -> List[str]:
 def get_default_name(code: str) -> str:
     """根据代码获取概念板块名称。"""
     return get_concept_sectors().get(code, code)
+
+
+def search_and_merge_concepts(keyword: str) -> Dict[str, Any]:
+    """从 westock search --type sector 反查关键词，把概念板块补进白名单。
+
+    用于"概念板块可发现"：用户搜不到的概念板块，通过此函数从接口
+    反查补全到缓存清单，下次就在宽表里出现。
+
+    Args:
+        keyword: 搜索关键词，如 "ChatGPT" / "军工"
+
+    Returns:
+        {"added": [{code, name}, ...], "total_before": N, "total_after": M}
+    """
+    from westock import search_sector
+    results = search_sector(keyword, raw=True) or []
+    before = len(get_concept_sectors())
+    added: List[Dict[str, str]] = []
+    for r in results:
+        # 仅接受分类含"概念"的条目，避免误把二级行业混进来
+        if "概念" not in (r.get("分类") or ""):
+            continue
+        code = r.get("code") or r.get("SecuCode")
+        name = r.get("name") or r.get("Name") or ""
+        if code and name:
+            if add_concept(code, name):
+                added.append({"code": code, "name": name})
+    return {
+        "added": added,
+        "total_before": before,
+        "total_after": len(get_concept_sectors()),
+    }

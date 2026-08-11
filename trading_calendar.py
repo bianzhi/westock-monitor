@@ -15,6 +15,7 @@
 
 import json
 import logging
+import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -24,6 +25,25 @@ from config import DATA_DIR
 logger = logging.getLogger(__name__)
 
 TRADING_DAYS_CACHE = DATA_DIR / "trading_days.json"
+
+
+def has_tushare_token() -> bool:
+    """活性探测：Tushare token 是否就绪。
+
+    优先读环境变量 SYSTEM_TUSHARE_TOKEN（与 circ_mv_collector 一致），
+    否则回退到 tushare.get_token()（~/.tushare/token 文件）。
+    用于 /api/health 数据源活性体检。
+    """
+    env_tok = os.environ.get("SYSTEM_TUSHARE_TOKEN", "").strip()
+    if env_tok:
+        return True
+    try:
+        import tushare as ts
+        return bool(ts.get_token())
+    except ImportError:
+        return False
+    except Exception:
+        return False
 
 
 def _try_tushare_cal() -> Optional[Set[str]]:

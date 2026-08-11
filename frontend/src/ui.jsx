@@ -14,11 +14,27 @@ export const LEVEL_COLORS = {
 
 /**
  * 强度档位标签
+ * 可解释性：hover Tooltip 展示判定依据（规模档 × 净额率阈值 × n 日窗口）
+ *          scale/window 来自 record（可选）；缺则只展 strength_value
  */
-export function StrengthTag({ level = "普通", value = 0 }) {
+export function StrengthTag({ level = "普通", value = 0, scale = null, windowN = null, netRate = null }) {
   const color = LEVEL_COLORS[level] || "#95a5a6";
+  // 拼可解释性提示：阈值表来自 config SCALE_THRESHOLDS，前端硬编码镜像一份
+  const THRESHOLDS = {
+    大盘: { hi: 5.0, mid: 2.0, lo: -1.0, vlo: -1.5 },
+    中盘: { hi: 7.0, mid: 3.0, lo: -1.5, vlo: -2.0 },
+    小盘: { hi: 10.0, mid: 4.0, lo: -2.0, vlo: -3.0 },
+  };
+  const sc = scale || "小盘";
+  const th = THRESHOLDS[sc] || THRESHOLDS["小盘"];
+  const lines = [
+    `强度值 ${value}`,
+    `规模档：${sc}（阈值 hi=${th.hi} mid=${th.mid} lo=${th.lo} vlo=${th.vlo}）`,
+  ];
+  if (windowN) lines.push(`窗口：近 ${windowN} 日聚合净额率`);
+  if (netRate != null) lines.push(`当前净额率 ${netRate.toFixed(2)}%`);
   return (
-    <Tooltip title={`强度值 ${value}`}>
+    <Tooltip title={lines.join(" · ")}>
       <span className="strength-tag" style={{ background: color }}>
         {level}
       </span>

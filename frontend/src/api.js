@@ -33,6 +33,9 @@ export const fetchErrors = (limit = 100) => api.get("/errors", { params: { limit
 export const refreshSectors = () =>
   api.post("/refresh-sectors").then((r) => r.data);
 
+export const refreshConcepts = (keyword = "") =>
+  api.post("/refresh-concepts", { keyword }).then((r) => r.data);
+
 export const triggerMinuteCollect = () =>
   api.post("/collect/minute").then((r) => r.data);
 
@@ -52,6 +55,26 @@ export const focusMinuteCollect = (codes) =>
 
 export const unfocusMinuteCollect = () =>
   api.post("/minute/focus", { codes: [] }).then((r) => r.data);
+
+// 强度档位告警
+export const fetchAlerts = (limit = 100) =>
+  api.get("/alerts", { params: { limit } }).then((r) => r.data);
+
+export const fetchUserAlerts = () =>
+  api.get("/user/alerts").then((r) => r.data);
+
+export const saveUserAlerts = (alerts) =>
+  api.post("/user/alerts", alerts).then((r) => r.data);
+
+// 自选板块（watchlist）
+export const fetchWatchlist = () =>
+  api.get("/user/watchlist").then((r) => r.data);
+
+export const addWatchlist = (codes) =>
+  api.post("/user/watchlist", { codes }).then((r) => r.data);
+
+export const removeWatchlist = (codes) =>
+  api.delete("/user/watchlist", { codes }).then((r) => r.data);
 
 // 用户偏好
 export const fetchUserPrefs = () =>

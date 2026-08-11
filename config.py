@@ -105,7 +105,8 @@ CIRC_MV_CHECK_INTERVAL = int(os.getenv("CIRC_MV_CHECK_INTERVAL", "300"))
 # 数据保留策略
 # ============================================================
 # 分钟级数据缓存天数
-MINUTE_CACHE_DAYS = int(os.getenv("MINUTE_CACHE_DAYS", "2"))
+# 默认 5 日：与"监控/盘后复盘"产品定位匹配，2 日保留配不上"分钟级资金流"卖点
+MINUTE_CACHE_DAYS = int(os.getenv("MINUTE_CACHE_DAYS", "5"))
 
 # ============================================================
 # 服务配置

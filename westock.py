@@ -21,7 +21,7 @@
 import json
 import subprocess
 import logging
-from typing import Any, List, Dict, Optional, Union, Set
+from typing import Any, List, Dict, Optional, Tuple, Union, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import (
@@ -29,6 +29,28 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _ping_cli() -> Tuple[bool, str]:
+    """活性探测：调 westock-data --version，返回 (ok, version)。
+
+    用 version 调用代替真实 fund flow，避免污染数据；超时 5s。
+    用于 /api/health 数据源活性体检。
+    """
+    try:
+        result = subprocess.run(
+            WESTOCK_CMD + ["--version"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True, timeout=5,
+        )
+        if result.returncode == 0:
+            ver = result.stdout.strip() or result.stderr.strip() or "ok"
+            return True, ver
+        return False, f"rc={result.returncode} {result.stderr.strip()[:100]}"
+    except subprocess.TimeoutExpired:
+        return False, "timeout 5s"
+    except Exception as e:
+        return False, str(e)[:100]
 
 
 def westock(*args: str, raw: bool = False, timeout: Optional[int] = None) -> Any:

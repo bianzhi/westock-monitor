@@ -159,6 +159,8 @@ class HealthResponse(BaseModel):
     cache_refreshing: bool = False
     cache_last_error: Optional[str] = None
     cache_updated: Optional[str] = None
+    # 数据源活性：每个源最近一次调用结果（ok/fail/skip）+ 最近错误
+    data_sources: Dict[str, Any] = {}
 
 
 class SectorRow(BaseModel):
@@ -175,6 +177,7 @@ class SectorRow(BaseModel):
     summary_5d: Optional[Dict[str, Any]] = None  # 近5日汇总
     strength_value: float = 0.0                  # 连续强度值 -2~+2
     strength_level: str = "普通"                 # 5档判定词
+    estimated: bool = False                      # True=缓存空仅今日 fallback，非真多日累加
 
 
 class SectorListResponse(BaseModel):
@@ -306,10 +309,49 @@ def _update_meta_with_realtime(daily_map: Dict, circ_mv_map: Dict) -> None:
 # ============================================================
 @app.get("/api/health", response_model=HealthResponse)
 async def health():
-    """健康检查 + 存储状态 + 缓存状态"""
+    """健康检查 + 存储状态 + 缓存状态 + 数据源活性"""
     storage = get_storage()
     stats = storage.get_stats()
     init_status = get_init_status()
+
+    # 数据源活性：实测三个外部源是否可用
+    # westock CLI（资金流 + 成交额） / Tushare（流通市值） / 交易日历
+    # 注意：腾讯原 HTTP 接口已死，成交额改用 westock 自身字段，无独立数据源
+    data_sources: Dict[str, Any] = {}
+    # 1. westock CLI —— 用 version 调用代替真实 fund flow，避免污染数据
+    try:
+        from westock import _ping_cli
+        cli_ok, cli_ver = _ping_cli()
+        data_sources["westock_cli"] = {
+            "status": "ok" if cli_ok else "fail",
+            "version": cli_ver,
+            "note": "资金流 + 成交额（替代已死的腾讯 HTTP）",
+        }
+    except Exception as e:
+        data_sources["westock_cli"] = {"status": "skip", "error": str(e)[:200]}
+
+    # 2. Tushare —— 流通市值数据源（circ_mv_collector 方案 A）
+    try:
+        from circ_mv_collector import _ping_tushare
+        tushare_ok, scope = _ping_tushare()
+        data_sources["tushare"] = {
+            "status": "ok" if tushare_ok else "degraded",
+            "scope": scope,
+            "note": "流通市值主方案；degraded 时降级 westock 反推（精度 ±20%）" if not tushare_ok else "",
+        }
+    except Exception as e:
+        data_sources["tushare"] = {"status": "skip", "error": str(e)[:200]}
+
+    # 3. 交易日历 —— Tushare Token 是否就绪（缺则降级 weekday 启发式）
+    try:
+        from trading_calendar import has_tushare_token
+        data_sources["trading_calendar"] = {
+            "status": "ok" if has_tushare_token() else "degraded",
+            "note": "degraded 时降级 weekday 启发式，节假日会错" if not has_tushare_token() else "",
+        }
+    except Exception as e:
+        data_sources["trading_calendar"] = {"status": "skip", "error": str(e)[:200]}
+
     return {
         "status": "ok",
         "timestamp": datetime.now().isoformat(),
@@ -320,6 +362,7 @@ async def health():
         "cache_refreshing": is_refresh_in_progress(),
         "cache_last_error": get_refresh_last_error(),
         "cache_updated": get_updated_time(),
+        "data_sources": data_sources,
     }
 
 
@@ -527,34 +570,39 @@ async def get_concept_sectors(
             net_10d = _sf(flow.get("MainNetFlow10D"))
             net_20d = _sf(flow.get("MainNetFlow20D"))
 
-            # 近3日：从缓存取真实日记录累加（缓存空则仅今日，valid_days=1）
+            # 近3日 + 近5日：统一走 concept_daily 真缓存累加（缓存空则仅今日）
+            # 修正 G4：原近5日用 MainNetFlow5D/4 均摊估算，与近3日口径分裂、
+            # 且强度判定输入与展示输入不一致。现统一走 concept_daily 真记录，
+            # 缓存空时 fallback 仅今日（valid_days=1），不再混入估算。
             cached_daily = storage.get_concept_daily_batch([code], days=20).get(code, [])
+            records_5d = []
             records_3d = []
             if cached_daily:
+                # cached_daily 已按 trade_date 倒序，取需要的窗口
+                cached_empty_fallback = False
                 for d in cached_daily:
-                    records_3d.append({
+                    rec = {
                         "date": d["trade_date"],
                         "net_flow": d.get("net_flow"),
                         "turnover": d.get("turnover"),
-                    })
+                    }
+                    records_5d.append(rec)
+                    records_3d.append(rec)
+                # 近3日仅取前 3 条（含今日）
+                records_3d = records_3d[:SUMMARY_3D]
+                # 近5日仅取前 5 条
+                records_5d = records_5d[:SUMMARY_5D]
             else:
-                records_3d.append({
-                    "date": today_str, "net_flow": today_net, "turnover": today_turnover,
-                })
+                today_rec = {"date": today_str, "net_flow": today_net, "turnover": today_turnover}
+                records_3d = [today_rec]
+                records_5d = [today_rec]
+                cached_empty_fallback = True
 
             summary_3d = _build_summary(records_3d, SUMMARY_3D, None)
-
-            # 近5日：直接用 API 的 MainNetFlow5D 累计值估算
-            records_5d = [{"date": today_str, "net_flow": today_net, "turnover": today_turnover}]
-            if net_5d is not None and today_net is not None:
-                prev_4d_total = net_5d - today_net
-                if prev_4d_total:
-                    prev_per_day = prev_4d_total / 4.0
-                    for i in range(1, 5):
-                        records_5d.append({"date": f"est_{i}", "net_flow": prev_per_day, "turnover": today_turnover})
-
             summary_5d = _build_summary(records_5d, SUMMARY_5D, None)
-            strength = _calc_strength_from_records(records_3d, None, n)
+            # 强度判定输入与展示输入一致：用近 n 日真记录（不足 n 时用已有）
+            strength_records = (cached_daily[:n] if cached_daily else [today_rec])
+            strength = _calc_strength_from_records(strength_records, None, n)
 
             rows.append(SectorRow(
                 code=code, name=flow.get("name") or get_default_name(code),
@@ -564,6 +612,7 @@ async def get_concept_sectors(
                 today_net_rate=_net_rate(today_net, today_turnover),
                 history=[], summary_3d=summary_3d, summary_5d=summary_5d,
                 strength_value=strength["value"], strength_level=strength["level"],
+                estimated=cached_empty_fallback,
             ))
 
         rows.sort(key=lambda r: r.strength_value, reverse=True)
@@ -1282,17 +1331,55 @@ async def export_sectors_csv(
 async def get_alerts(
     date: Optional[str] = Query(None, description="YYYYMMDD，默认全部"),
     limit: int = Query(50, description="最多返回条数"),
+    user_id: Optional[str] = Depends(get_current_user),
 ):
-    """获取强度档位变化告警日志。
+    """获取强度档位变化告警日志，可按用户阈值筛选。
 
     告警在后台缓存刷新时自动检测，档位变化（如 普通→强）时写入。
+    若用户已登录且设了阈值（strength_up/strength_down/levels），则
+    仅返回符合阈值的告警；未登录或未设阈值则返回全部。
     """
     try:
         alerts = get_storage().get_alerts(trade_date=date, limit=limit)
+
+        # 按用户阈值筛选
+        if user_id:
+            try:
+                from supabase_user import get_user_alerts as _ga
+                user_cfg = _ga(user_id) or {}
+            except Exception:
+                user_cfg = {}
+            # levels 白名单：如 ["强","偏强"] 仅留这些档位的告警
+            levels_whitelist = user_cfg.get("levels")
+            # strength_up：仅留 new_value >= 该阈值的告警（如 1.0 = 偏强以上）
+            up_threshold = user_cfg.get("strength_up")
+            # strength_down：仅留 new_value <= 该阈值的告警（如 -1.0 = 偏弱以下）
+            down_threshold = user_cfg.get("strength_down")
+            # codes 白名单：仅留用户关注的板块（可配合 watchlist 用）
+            codes_whitelist = user_cfg.get("codes")
+
+            def _match(a):
+                new_level = a.get("new_level")
+                new_value = a.get("new_value")
+                code = a.get("code")
+                if levels_whitelist and new_level not in levels_whitelist:
+                    return False
+                if up_threshold is not None and (new_value is None or new_value < up_threshold):
+                    return False
+                if down_threshold is not None and (new_value is None or new_value > down_threshold):
+                    return False
+                if codes_whitelist and code not in codes_whitelist:
+                    return False
+                return True
+
+            if any(v is not None for v in (levels_whitelist, up_threshold, down_threshold, codes_whitelist)):
+                alerts = [a for a in alerts if _match(a)]
+
         return {
             "total": len(alerts),
             "alerts": alerts,
             "timestamp": datetime.now().isoformat(),
+            "user_filter_applied": user_id is not None,
         }
     except Exception as e:
         logger.error("get_alerts failed: %s", e, exc_info=True)
@@ -1304,12 +1391,45 @@ async def get_alerts(
 # ============================================================
 @app.post("/api/refresh-sectors")
 async def api_refresh_sectors():
-    """手动刷新板块列表"""
+    """手动刷新板块列表，返回 diff（新增/剔除）"""
     try:
-        n = refresh_sectors()
-        return {"status": "ok", "sectors_count": n, "timestamp": datetime.now().isoformat()}
+        result = refresh_sectors()  # 现返回 dict 含 sectors_count/added/removed/source
+        return {"status": "ok", **result, "timestamp": datetime.now().isoformat()}
     except Exception as e:
         logger.error("refresh_sectors failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/refresh-concepts")
+async def api_refresh_concepts(body: Dict[str, Any] = None):
+    """从 westock search 反查关键词，把概念板块补全到白名单。
+
+    body: {"keyword": "军工"} —— 留空则按内置高频词清单批量补全。
+    用于"概念板块可发现"：用户搜不到的概念板块，通过此接口反查补全。
+    """
+    from concept_sectors import search_and_merge_concepts, get_default_codes
+    try:
+        # body 可能为 None（无 body 调用）
+        body = body or {}
+        keyword = body.get("keyword", "").strip()
+        if keyword:
+            result = search_and_merge_concepts(keyword)
+            return {"status": "ok", "keyword": keyword, **result,
+                    "timestamp": datetime.now().isoformat()}
+        # 留空：按内置高频词清单批量补全
+        BATCH_KEYWORDS = ["ChatGPT", "军工", "新能源", "半导体", "AI",
+                          "光伏", "储能", "氢能", "芯片", "数字经济"]
+        merged_added = []
+        before = len(get_default_codes())
+        for kw in BATCH_KEYWORDS:
+            r = search_and_merge_concepts(kw)
+            merged_added.extend(r["added"])
+        after = len(get_default_codes())
+        return {"status": "ok", "keyword": "(batch)", "added": merged_added,
+                "total_before": before, "total_after": after,
+                "timestamp": datetime.now().isoformat()}
+    except Exception as e:
+        logger.error("refresh_concepts failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
