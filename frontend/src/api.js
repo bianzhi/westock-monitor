@@ -28,6 +28,7 @@ export const fetchStrengthRanking = (n, top) =>
 
 export const fetchHealth = () => api.get("/health").then((r) => r.data);
 export const fetchConfig = () => api.get("/config").then((r) => r.data);
+export const fetchErrors = (limit = 100) => api.get("/errors", { params: { limit } }).then((r) => r.data);
 
 export const refreshSectors = () =>
   api.post("/refresh-sectors").then((r) => r.data);

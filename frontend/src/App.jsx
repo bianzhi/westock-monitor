@@ -18,7 +18,7 @@ import { MinuteChart, DailyHistoryChart, NetRateCompareChart } from "./Charts";
 import SectorDetail from "./SectorDetail";
 import L1Tab from "./L1Tab";
 import CompareChart from "./CompareChart";
-import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect, fetchUserPrefs, saveUserPrefs, fetchConceptSectors } from "./api";
+import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect, fetchUserPrefs, saveUserPrefs, fetchConceptSectors, fetchErrors } from "./api";
 import AuthGuard from "./components/AuthGuard";
 
 const { Header, Content, Footer } = Layout;
@@ -45,6 +45,22 @@ export default function App() {
   // 概念板块
   const [conceptSectors, setConceptSectors] = useState([]);
   const [conceptLoading, setConceptLoading] = useState(false);
+
+  // 错误日志
+  const [errorLogs, setErrorLogs] = useState([]);
+  const [errorLoading, setErrorLoading] = useState(false);
+
+  const loadErrors = useCallback(async () => {
+    setErrorLoading(true);
+    try {
+      const data = await fetchErrors(100);
+      setErrorLogs(data.errors || []);
+    } catch (e) {
+      message.error("加载错误日志失败");
+    } finally {
+      setErrorLoading(false);
+    }
+  }, []);
 
   const loadConceptSectors = useCallback(async () => {
     setConceptLoading(true);
@@ -628,6 +644,31 @@ export default function App() {
                       pageSize: 50, showSizeChanger: true, pageSizeOptions: [20, 50, 100],
                       showTotal: (total) => `共 ${total} 个概念板块`,
                     }}
+                  />
+                </Card>
+              ),
+            },
+            {
+              key: "errors",
+              label: `错误日志 (${errorLogs.length})`,
+              children: (
+                <Card title="服务错误日志" extra={<Button size="small" onClick={loadErrors} loading={errorLoading}>刷新</Button>}>
+                  <Table
+                    rowKey={(_, i) => i}
+                    dataSource={errorLogs}
+                    size="small"
+                    pagination={{ pageSize: 50, showSizeChanger: false }}
+                    columns={[
+                      { title: "时间", dataIndex: "time", key: "time", width: 180 },
+                      {
+                        title: "级别", dataIndex: "level", key: "level", width: 80,
+                        render: (v) => {
+                          const color = v === "ERROR" || v === "CRITICAL" ? "#e74c3c" : "#f39c12";
+                          return <span style={{ color, fontWeight: "bold" }}>{v}</span>;
+                        },
+                      },
+                      { title: "消息", dataIndex: "msg", key: "msg", ellipsis: true },
+                    ]}
                   />
                 </Card>
               ),

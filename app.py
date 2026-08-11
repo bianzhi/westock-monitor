@@ -76,6 +76,20 @@ _concept_cache_lock = threading.Lock()
 CONCEPT_CACHE_TTL_SEC = 15  # 15s 内重复请求直接返回缓存，避免每次切 tab 都同步阻塞调 CLI
 _concept_fail_count: int = 0  # CLI 连续失败次数（成功时重置）
 
+# 内存错误缓冲（供 /api/errors 实时查询）
+from collections import deque
+_error_buffer: deque = deque(maxlen=200)  # 最近 200 条错误
+
+
+def _record_error(level: str, msg: str):
+    """记录错误到内存缓冲，供 /api/errors 页面查询。"""
+    from datetime import datetime
+    _error_buffer.append({
+        "time": datetime.now().isoformat(),
+        "level": level,
+        "msg": msg[:500],  # 截断过长消息
+    })
+
 # ============================================================
 # 日志配置
 # ============================================================
@@ -306,6 +320,34 @@ async def health():
         "cache_refreshing": is_refresh_in_progress(),
         "cache_last_error": get_refresh_last_error(),
         "cache_updated": get_updated_time(),
+    }
+
+
+@app.get("/api/errors")
+async def get_errors(limit: int = Query(100, description="返回最近 N 条错误")):
+    """错误日志：内存缓冲 + 日志文件最近 ERROR/WARNING 行"""
+    import re
+    errors = list(_error_buffer)
+    # 补充日志文件中的 ERROR/WARNING（去重）
+    try:
+        with open(LOG_FILE, "r") as f:
+            lines = f.readlines()
+        seen = {e["msg"] for e in errors}
+        for line in reversed(lines):
+            if len(errors) >= limit:
+                break
+            m = re.match(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) \[(\w+)\] (\w+): (.+)', line)
+            if m:
+                time_str, level, _, msg = m.group(1), m.group(2), m.group(3), m.group(4).strip()
+                if level in ("ERROR", "WARNING", "CRITICAL") and msg not in seen:
+                    errors.append({"time": time_str, "level": level, "msg": msg[:500]})
+                    seen.add(msg)
+    except Exception:
+        pass
+    errors.sort(key=lambda e: e["time"], reverse=True)
+    return {
+        "count": len(errors),
+        "errors": errors[:limit],
     }
 
 
