@@ -193,6 +193,14 @@ else
 fi
 cd "$PROJECT_DIR"
 
+# 安装 git post-merge hook（git pull 后自动重启）
+HOOK_FILE="$PROJECT_DIR/.git/hooks/post-merge"
+if [ -d "$PROJECT_DIR/.git" ] && [ ! -f "$HOOK_FILE" ]; then
+    cp "$PROJECT_DIR/scripts/post-merge.sh" "$HOOK_FILE"
+    chmod +x "$HOOK_FILE"
+    echo "✅ git post-merge hook 已安装"
+fi
+
 # ----------------------------------------------------------
 # 4. 启动服务
 # ----------------------------------------------------------
