@@ -51,20 +51,23 @@ _kill_port() {
     return 0
 }
 
-# 1a. 先杀端口进程（不管用没用 systemd，端口必须释放）
+# 1a. 先停 systemd（否则 Restart=always 会复活进程）
+if $USE_SYSTEMD; then
+    if systemctl is-active --quiet westock-monitor 2>/dev/null; then
+        systemctl stop westock-monitor 2>/dev/null || true
+    fi
+fi
+
+# 1b. 再杀端口进程（确保彻底清理）
 _kill_port 8200 || true
 _kill_port 5173 || true
-# 额外清理 uvicorn/vite 残留
 for name in uvicorn vite; do
     pids=$(pgrep -f "$name" 2>/dev/null || true)
     [ -n "$pids" ] && kill $pids 2>/dev/null || true
 done
 
-# 1b. 再处理 systemd 服务
+# 1c. 清理 systemd 注册
 if $USE_SYSTEMD; then
-    if systemctl is-active --quiet westock-monitor 2>/dev/null; then
-        systemctl stop westock-monitor 2>/dev/null || true
-    fi
     if systemctl is-enabled --quiet westock-monitor 2>/dev/null; then
         systemctl disable westock-monitor 2>/dev/null || true
     fi
