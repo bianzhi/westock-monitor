@@ -451,6 +451,7 @@ async def get_concept_sectors(
     from concept_sectors import get_default_codes, get_default_name
     from westock import fund_flow, extract_main_net_flow
 
+    storage = get_storage()
     codes = get_default_codes()
     if not codes:
         empty_resp = SectorListResponse(
