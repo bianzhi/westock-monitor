@@ -145,7 +145,7 @@ export default function App() {
   const [compareMethod, setCompareMethod] = useState("rank");
   const [compareStart, setCompareStart] = useState(1);
   const [compareEnd, setCompareEnd] = useState(10);
-  const [compareMode, setCompareMode] = useState("minute");  // minute / cumulative
+  const [compareMode, setCompareMode] = useState("cumulative");  // minute / cumulative
   const [compareSource, setCompareSource] = useState("l2");  // l2 / concept
   const [manualCodes, setManualCodes] = useState("");  // 手动输入板块代码
   const [compareData, setCompareData] = useState(null);
