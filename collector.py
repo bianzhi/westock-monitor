@@ -725,6 +725,9 @@ def run_collector_loop(force: bool = False) -> None:
     backoff = 0          # 连续限流次数
     cycle = 0            # 周期计数（用于定期补采全量）
     FULL_EVERY_N = 7     # 每 N 个聚焦周期补采一次全量（7×8s≈56s）
+    # 概念板块分钟补采独立计数器：不能复用 cycle（无聚焦分支末尾会重置 cycle，
+    # 复用会导致 % CONCEPT_MINUTE_EVERY_N 永不成立——历史 bug）
+    concept_cycle = 0
     CONCEPT_MINUTE_EVERY_N = 5  # 每 N 轮全量采集补采一次概念板块分钟数据（5×60s≈5分钟）
     # 盘后修正窗口去重：按 date 标记，跨日重置（每日 15:00-15:30 仅补采一次）
     fired_after_close_date: str = ""
@@ -819,8 +822,8 @@ def run_collector_loop(force: bool = False) -> None:
             # 概念板块分钟补采：每 CONCEPT_MINUTE_EVERY_N 轮采一次
             # （626 码 fund_flow 约 10-15s，不能与 l2 同频；每 ~5 分钟一次
             #   足够分时图呈现曲线，也避免过度占用 CLI）
-            cycle += 1
-            if cycle % CONCEPT_MINUTE_EVERY_N == 0:
+            concept_cycle += 1
+            if concept_cycle % CONCEPT_MINUTE_EVERY_N == 0:
                 try:
                     from concept_sectors import get_default_codes as _gdc
                     concept_codes = _gdc()
