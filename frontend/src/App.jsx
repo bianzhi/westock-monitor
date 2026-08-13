@@ -238,7 +238,8 @@ export default function App() {
   const [warmupRetries, setWarmupRetries] = useState(0);  // 预热重试进度
 
   // 拉取板块列表（缓存预热期指数退避重试，最多 20 次，总时长 ~3 分钟）
-  const loadSectors = useCallback(async (forceRefresh = false) => {
+  // silent=true 时（后台自动刷新/dirty-flag）不弹消息，只在首次/手动刷新时提示
+  const loadSectors = useCallback(async (forceRefresh = false, silent = false) => {
     setLoading(true);
     const MAX_RETRIES = forceRefresh ? 1 : 20;  // 强制刷新时只试 1 次（后端同步等待）
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -247,7 +248,9 @@ export default function App() {
         setSectors(data.sectors || []);
         setLastUpdate(data.last_update || "");
         setWarmupRetries(0);
-        message.success(`已加载 ${data.total} 个板块`);
+        if (!silent) {
+          message.success(`已加载 ${data.total} 个板块`);
+        }
         break;
       } catch (e) {
         const status = e.response?.status;
@@ -279,13 +282,13 @@ export default function App() {
     try {
       const h = await fetchHealth();
       setHealth(h);
-      // dirty-flag：cache_updated 变化 → 触发宽表刷新
+      // dirty-flag：cache_updated 变化 → 触发宽表刷新（静默，不弹消息）
       const newUpdated = h?.cache_updated || "";
       if (newUpdated && newUpdated !== lastCacheUpdatedRef.current) {
         lastCacheUpdatedRef.current = newUpdated;
         // 仅在宽表类 Tab 活跃时刷新，避免切走时无谓请求
         if (activeTab === "l2" || activeTab === "concept") {
-          loadSectors(false);
+          loadSectors(false, true);
         }
       }
     } catch (e) {
@@ -314,8 +317,12 @@ export default function App() {
     }
   }, [n]);
 
-  // 初始化
+  // 初始化（只执行一次；loadHealth 依赖 activeTab，切 Tab 时若重新触发会导致
+  // 每次切换都重新 loadSectors 并弹消息——用 ref 保护首次挂载只跑一次）
+  const didInitRef = useRef(false);
   useEffect(() => {
+    if (didInitRef.current) return;
+    didInitRef.current = true;
     loadSectors();
     loadHealth();
     loadWatchlist();  // 自选板块加载（登录走 Supabase，未登录走 localStorage）
