@@ -32,20 +32,21 @@ logger = logging.getLogger(__name__)
 
 
 def _ping_cli() -> Tuple[bool, str]:
-    """活性探测：调 westock-data --version，返回 (ok, version)。
+    """活性探测：调 westock-data --help，返回 (ok, version)。
 
-    用 version 调用代替真实 fund flow，避免污染数据；超时 5s。
+    用 help 调用代替真实 fund flow，避免污染数据；超时 5s。
+    注意：该 CLI 不支持 --version（返回非 0），--help 才是合法探活参数。
     用于 /api/health 数据源活性体检。
     """
     try:
         result = subprocess.run(
-            WESTOCK_CMD + ["--version"],
+            WESTOCK_CMD + ["--help"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True, timeout=5,
         )
         if result.returncode == 0:
             ver = result.stdout.strip() or result.stderr.strip() or "ok"
-            return True, ver
+            return True, ver[:80]
         return False, f"rc={result.returncode} {result.stderr.strip()[:100]}"
     except subprocess.TimeoutExpired:
         return False, "timeout 5s"

@@ -620,14 +620,33 @@ export default function App() {
             刷新板块列表
           </Button>
           <Button
-            onClick={async () => {
-              try {
-                const r = await refreshConcepts("");
-                message.success(`已补全概念板块：新增 ${r.added?.length || 0} 个，总计 ${r.total_after}`);
-                loadConceptSectors();  // 刷新前端宽表
-              } catch (e) {
-                message.error("刷新概念板块失败: " + (e.response?.data?.detail || e.message));
-              }
+            onClick={() => {
+              // 显式 keyword 补全：弹窗输入概念关键词，避免空 body 批量副作用
+              let kw = "";
+              Modal.confirm({
+                title: "刷新概念板块",
+                content: (
+                  <Input
+                    placeholder="输入概念关键词，如：低空经济 / AI 医疗"
+                    onChange={(e) => { kw = e.target.value.trim(); }}
+                    style={{ marginTop: 8 }}
+                  />
+                ),
+                onOk: async () => {
+                  if (!kw) {
+                    message.warning("请输入关键词");
+                    return Promise.reject();
+                  }
+                  try {
+                    const r = await refreshConcepts(kw);
+                    message.success(`已补全「${kw}」：新增 ${r.added?.length || 0} 个，总计 ${r.total_after}`);
+                    loadConceptSectors();  // 刷新前端宽表
+                  } catch (e) {
+                    message.error("刷新概念板块失败: " + (e.response?.data?.detail || e.message));
+                    throw e;
+                  }
+                },
+              });
             }}
           >
             刷新概念

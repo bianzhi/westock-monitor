@@ -76,6 +76,12 @@ _concept_cache_lock = threading.Lock()
 CONCEPT_CACHE_TTL_SEC = 15  # 15s 内重复请求直接返回缓存，避免每次切 tab 都同步阻塞调 CLI
 _concept_fail_count: int = 0  # CLI 连续失败次数（成功时重置）
 
+# 概念板块全量 flow 后台缓存（解决单 worker 阻塞：API 秒回，刷新由后台线程做）
+_concept_flow_cache: Dict[str, Any] = {}  # {"ts": float, "flow_map": dict, "codes": list}
+_concept_flow_lock = threading.Lock()
+CONCEPT_FLOW_TTL_SEC = 45  # 后台每 ~45s 刷新一次全量 flow
+_concept_flow_refreshing = False  # 刷新去重锁
+
 # 内存错误缓冲（供 /api/errors 实时查询）
 from collections import deque
 _error_buffer: deque = deque(maxlen=200)  # 最近 200 条错误
@@ -508,6 +514,58 @@ async def get_sectors(
     )
 
 
+# ============================================================
+# 概念板块全量 flow 后台缓存（解决单 worker 阻塞）
+# ============================================================
+def _refresh_concept_flow_cache() -> Dict[str, Any]:
+    """后台拉取全量概念板块 fund_flow，存 _concept_flow_cache。
+
+    与 get_concept_sectors 解耦：API 层只读缓存，刷新由后台线程做，
+    避免 626 码 fund_flow 的 10-15s 阻塞 uvicorn 单 worker。
+    幂等：_concept_flow_refreshing 去重，并发调用只拉一次。
+    """
+    global _concept_flow_refreshing
+    if _concept_flow_refreshing:
+        return _concept_flow_cache.get("flow_map", {})
+    _concept_flow_refreshing = True
+    try:
+        from concept_sectors import get_default_codes
+        from westock import fund_flow
+        codes = get_default_codes()
+        if not codes:
+            return {}
+        t0 = time.time()
+        flow_records = fund_flow(codes, raw=True)
+        flow_map: Dict[str, Dict] = {}
+        for r in flow_records:
+            c = r.get("code") or r.get("SecuCode")
+            if c:
+                flow_map[c] = r
+        with _concept_flow_lock:
+            _concept_flow_cache["ts"] = time.time()
+            _concept_flow_cache["flow_map"] = flow_map
+            _concept_flow_cache["codes"] = codes
+        logger.info("concept_flow_cache: refreshed %d/%d codes in %.1fs",
+                    len(flow_map), len(codes), time.time() - t0)
+        return flow_map
+    except Exception as e:
+        logger.warning("concept_flow_cache refresh failed: %s", e, exc_info=True)
+        return _concept_flow_cache.get("flow_map", {})
+    finally:
+        _concept_flow_refreshing = False
+
+
+def _concept_flow_loop():
+    """后台定期刷新概念板块 flow 缓存（每 CONCEPT_FLOW_TTL_SEC 秒）。"""
+    import time as _t
+    while True:
+        try:
+            _refresh_concept_flow_cache()
+        except Exception as e:
+            logger.warning("concept_flow_loop error: %s", e)
+        _t.sleep(CONCEPT_FLOW_TTL_SEC)
+
+
 @app.get("/api/sectors/concept", response_model=SectorListResponse)
 async def get_concept_sectors(
     n: int = Query(STRENGTH_WINDOW_N, description="强度判定窗口"),
@@ -525,7 +583,7 @@ async def get_concept_sectors(
     cache_key = f"concept_{n}"
     now = time.time()
 
-    # 非强制刷新：命中缓存直接返回
+    # 非强制刷新：命中响应缓存直接返回（秒回）
     if not force_refresh:
         with _concept_cache_lock:
             entry = _concept_cache.get(cache_key)
@@ -534,7 +592,7 @@ async def get_concept_sectors(
                 return entry["data"]
 
     from concept_sectors import get_default_codes, get_default_name
-    from westock import fund_flow, extract_main_net_flow
+    from westock import extract_main_net_flow
 
     storage = get_storage()
     codes = get_default_codes()
@@ -552,12 +610,18 @@ async def get_concept_sectors(
             try: return float(v)
             except (TypeError, ValueError): return None
 
-        flow_records = fund_flow(codes, raw=True)
-        flow_map: dict = {}
-        for r in flow_records:
-            c = r.get("code") or r.get("SecuCode")
-            if c:
-                flow_map[c] = r
+        # 优先读后台 flow 缓存（已 refresh 且未过期 → 秒回，不阻塞单 worker）
+        with _concept_flow_lock:
+            cached = _concept_flow_cache.get("flow_map", {})
+            cached_ts = _concept_flow_cache.get("ts", 0)
+        if cached and (now - cached_ts) < CONCEPT_FLOW_TTL_SEC:
+            flow_map = cached
+        else:
+            # 缓存缺失/过期：同步拉一次（首次启动预热），后续由后台线程续
+            flow_map = _refresh_concept_flow_cache()
+        if not flow_map:
+            # 后台拉取失败且无缓存：触发一次后台刷新，返回旧缓存或空
+            raise RuntimeError("concept flow cache empty")
 
         rows = []
         today_str = date.today().isoformat()
@@ -1404,7 +1468,9 @@ async def api_refresh_sectors():
 async def api_refresh_concepts(body: Dict[str, Any] = None):
     """从 westock search 反查关键词，把概念板块补全到白名单。
 
-    body: {"keyword": "军工"} —— 留空则按内置高频词清单批量补全。
+    body: {"keyword": "军工"}       —— 反查并真实写入白名单
+          {"keyword": "军工", "dry_run": true} —— 只返回候选，不写库
+          空 body                    —— 按内置高频词批量 dry-run（预览），不写库
     用于"概念板块可发现"：用户搜不到的概念板块，通过此接口反查补全。
     """
     from concept_sectors import search_and_merge_concepts, get_default_codes
@@ -1412,21 +1478,24 @@ async def api_refresh_concepts(body: Dict[str, Any] = None):
         # body 可能为 None（无 body 调用）
         body = body or {}
         keyword = body.get("keyword", "").strip()
+        dry_run = bool(body.get("dry_run", False))
+
         if keyword:
-            result = search_and_merge_concepts(keyword)
-            return {"status": "ok", "keyword": keyword, **result,
+            result = search_and_merge_concepts(keyword, dry_run=dry_run)
+            return {"status": "ok", "keyword": keyword, "dry_run": dry_run, **result,
                     "timestamp": datetime.now().isoformat()}
-        # 留空：按内置高频词清单批量补全
+        # 空 body：批量 dry-run 预览（不写库），避免无确认的持久化副作用
         BATCH_KEYWORDS = ["ChatGPT", "军工", "新能源", "半导体", "AI",
                           "光伏", "储能", "氢能", "芯片", "数字经济"]
         merged_added = []
         before = len(get_default_codes())
         for kw in BATCH_KEYWORDS:
-            r = search_and_merge_concepts(kw)
+            r = search_and_merge_concepts(kw, dry_run=True)
             merged_added.extend(r["added"])
-        after = len(get_default_codes())
-        return {"status": "ok", "keyword": "(batch)", "added": merged_added,
-                "total_before": before, "total_after": after,
+        return {"status": "ok", "keyword": "(batch-dry-run)", "dry_run": True,
+                "added": merged_added,
+                "total_before": before, "total_after": before + len(merged_added),
+                "note": "dry-run 预览，未写库；要真正补全请传 keyword",
                 "timestamp": datetime.now().isoformat()}
     except Exception as e:
         logger.error("refresh_concepts failed: %s", e, exc_info=True)
@@ -1652,6 +1721,10 @@ try:
         threading.Thread(target=run_collector_loop, daemon=True, name="collector").start()
         logger.info("collector loop started")
 
+        # 启动概念板块全量 flow 后台缓存线程（API 秒回，刷新不阻塞单 worker）
+        threading.Thread(target=_concept_flow_loop, daemon=True, name="concept_flow").start()
+        logger.info("concept flow cache loop started")
+
         yield  # 应用运行中...
 
         # ---- 关闭 ----
@@ -1717,6 +1790,10 @@ except ImportError:
         from collector import run_collector_loop
         threading.Thread(target=run_collector_loop, daemon=True, name="collector").start()
         logger.info("collector loop started")
+
+        # 启动概念板块全量 flow 后台缓存线程（API 秒回，刷新不阻塞单 worker）
+        threading.Thread(target=_concept_flow_loop, daemon=True, name="concept_flow").start()
+        logger.info("concept flow cache loop started")
 
 
 # ============================================================

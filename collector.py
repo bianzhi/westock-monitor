@@ -230,20 +230,25 @@ def is_trading_time(now: Optional[datetime] = None) -> bool:
 # ============================================================
 # 分钟级采集
 # ============================================================
-def collect_minute_snapshot() -> Dict[str, Any]:
+def collect_minute_snapshot(codes: Optional[List[str]] = None) -> Dict[str, Any]:
     """采集一次分钟级快照。
 
     步骤：
       1. 调 westock fund flow 批量拿 MainNetFlow (累计)
-      2. 调腾讯 HTTP 拿 turnover (成交额) + circ_mv (流通市值)
+      2. 成交额自算（fund flow 的 MainInFlow + MainOutFlow）
       3. 与上一分钟快照差分，得本分钟净流入
       4. 入库 storage.upsert_minute_snapshot
+
+    Args:
+        codes: None 时用二级板块代码（get_sector_codes）；
+               传概念板块代码（pt02）则采集概念板块分钟数据。
 
     Returns:
         {"timestamp": "...", "sectors_collected": N, "errors": [...]}
     """
     storage = get_storage()
-    codes = get_sector_codes()
+    if codes is None:
+        codes = get_sector_codes()
     if not codes:
         logger.warning("collect_minute_snapshot: no sector codes")
         return {"timestamp": datetime.now().isoformat(), "sectors_collected": 0, "errors": ["no_codes"]}
@@ -349,6 +354,11 @@ def collect_concept_daily_snapshot() -> Dict[str, Any]:
     today = date.today().strftime("%Y%m%d")
     if _concept_daily_snapshot_date == today:
         return {"skipped": True, "reason": "already snapshotted today"}
+
+    # 交易日守卫：非交易日（周末/节假日）不写入，避免污染近3/5日真实累加
+    if not is_trading_day(date.today()):
+        logger.info("concept_daily_snapshot: %s not a trading day, skipped", today)
+        return {"skipped": True, "reason": "not a trading day"}
 
     from concept_sectors import get_default_codes, get_default_name
     from westock import fund_flow as _ff, extract_main_net_flow as _emnf
@@ -715,6 +725,7 @@ def run_collector_loop(force: bool = False) -> None:
     backoff = 0          # 连续限流次数
     cycle = 0            # 周期计数（用于定期补采全量）
     FULL_EVERY_N = 7     # 每 N 个聚焦周期补采一次全量（7×8s≈56s）
+    CONCEPT_MINUTE_EVERY_N = 5  # 每 N 轮全量采集补采一次概念板块分钟数据（5×60s≈5分钟）
     # 盘后修正窗口去重：按 date 标记，跨日重置（每日 15:00-15:30 仅补采一次）
     fired_after_close_date: str = ""
     fired_after_close: bool = False
@@ -804,6 +815,20 @@ def run_collector_loop(force: bool = False) -> None:
                 logger.info("collector full snapshot: %s", result)
             except Exception as e:
                 logger.error("collector full error: %s", e, exc_info=True)
+
+            # 概念板块分钟补采：每 CONCEPT_MINUTE_EVERY_N 轮采一次
+            # （626 码 fund_flow 约 10-15s，不能与 l2 同频；每 ~5 分钟一次
+            #   足够分时图呈现曲线，也避免过度占用 CLI）
+            cycle += 1
+            if cycle % CONCEPT_MINUTE_EVERY_N == 0:
+                try:
+                    from concept_sectors import get_default_codes as _gdc
+                    concept_codes = _gdc()
+                    c_result = collect_minute_snapshot(concept_codes)
+                    logger.info("collector concept minute snapshot: %s", c_result)
+                except Exception as e:
+                    logger.warning("collector concept minute error: %s", e, exc_info=True)
+
             backoff = 0
             cycle = 0
             delay = MINUTE_INTERVAL

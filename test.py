@@ -37,9 +37,11 @@ VERBOSE = "--verbose" in sys.argv
 
 # ============================================================
 # 期望常量（回归基线）—— 数据源正常时这些值应稳定
+# 生产环境完整数据源：134/31；本地开发库可能只有部分板块缓存，
+# 用环境变量 EXPECTED_L2_COUNT / EXPECTED_L1_COUNT 覆盖，避免本地误报。
 # ============================================================
-EXPECTED_L2_COUNT = 134          # 申万 2021 二级板块硬编码 134
-EXPECTED_L1_COUNT = 31           # 申万 2021 一级行业
+EXPECTED_L2_COUNT = int(os.environ.get("EXPECTED_L2_COUNT", "134"))   # 申万 2021 二级板块
+EXPECTED_L1_COUNT = int(os.environ.get("EXPECTED_L1_COUNT", "31"))    # 申万 2021 一级行业
 EXPECTED_STRENGTH_LEVELS = {"强", "偏强", "普通", "偏弱", "弱"}
 EXPECTED_SCALES = {"大盘", "中盘", "小盘"}
 

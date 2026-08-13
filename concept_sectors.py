@@ -697,7 +697,7 @@ def get_default_name(code: str) -> str:
     return get_concept_sectors().get(code, code)
 
 
-def search_and_merge_concepts(keyword: str) -> Dict[str, Any]:
+def search_and_merge_concepts(keyword: str, dry_run: bool = False) -> Dict[str, Any]:
     """从 westock search --type sector 反查关键词，把概念板块补进白名单。
 
     用于"概念板块可发现"：用户搜不到的概念板块，通过此函数从接口
@@ -705,6 +705,7 @@ def search_and_merge_concepts(keyword: str) -> Dict[str, Any]:
 
     Args:
         keyword: 搜索关键词，如 "ChatGPT" / "军工"
+        dry_run: True 时不写缓存，只返回"将会新增"的候选（供确认展示）
 
     Returns:
         {"added": [{code, name}, ...], "total_before": N, "total_after": M}
@@ -720,10 +721,15 @@ def search_and_merge_concepts(keyword: str) -> Dict[str, Any]:
         code = r.get("code") or r.get("SecuCode")
         name = r.get("name") or r.get("Name") or ""
         if code and name:
-            if add_concept(code, name):
-                added.append({"code": code, "name": name})
+            if dry_run:
+                # dry-run：不写库，仅当该码不在现有清单时算作候选
+                if code not in get_concept_sectors():
+                    added.append({"code": code, "name": name})
+            else:
+                if add_concept(code, name):
+                    added.append({"code": code, "name": name})
     return {
         "added": added,
         "total_before": before,
-        "total_after": len(get_concept_sectors()),
+        "total_after": len(get_concept_sectors()) if not dry_run else before + len(added),
     }
