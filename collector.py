@@ -732,6 +732,8 @@ def run_collector_loop(force: bool = False) -> None:
     # 盘后修正窗口去重：按 date 标记，跨日重置（每日 15:00-15:30 仅补采一次）
     fired_after_close_date: str = ""
     fired_after_close: bool = False
+    # 概念板块分钟补采去重：交易时段采集不完整时，非交易时段越早越好补采一次
+    concept_minute_backfill_date: str = ""
 
     while True:
         now = datetime.now()
@@ -755,6 +757,26 @@ def run_collector_loop(force: bool = False) -> None:
                     fired_after_close = True
                 except Exception as e:
                     logger.warning("collector post-close snapshot error: %s", e)
+
+            # 概念板块分钟补采：交易时段若采集不完整（服务重启/失败导致），
+            # 非交易时段越早越好补采一次全量（每天一次，跨日重置）。
+            # 判断标准：当日概念板块分钟记录数 < 概念板块数 × 50%。
+            if concept_minute_backfill_date != today_str:
+                concept_minute_backfill_date = today_str
+                try:
+                    from concept_sectors import get_default_codes as _gdc
+                    from storage import get_storage as _gs
+                    concept_codes = _gdc()
+                    if concept_codes:
+                        _deltas = _gs().get_minute_deltas_batch(concept_codes, today_str)
+                        _collected = sum(1 for v in _deltas.values() if v)
+                        if _collected < len(concept_codes) * 0.5:
+                            logger.info("collector: concept minute incomplete (%d/%d), backfilling...",
+                                        _collected, len(concept_codes))
+                            c_result = collect_minute_snapshot(concept_codes)
+                            logger.info("collector: concept minute backfill done: %s", c_result)
+                except Exception as e:
+                    logger.warning("collector concept minute backfill error: %s", e, exc_info=True)
 
             # 收盘后采集概念板块日快照（每天仅一次，幂等）
             # 触发窗口收紧到 15:00-23:59：避免盘前 09:00 前误触；函数内
