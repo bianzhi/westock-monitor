@@ -231,6 +231,11 @@ if $USE_SYSTEMD && $PROD_MODE; then
     sed -i "s|WorkingDirectory=.*|WorkingDirectory=$PROJECT_DIR|" /etc/systemd/system/westock-monitor.service
     sed -i "s|ExecStart=.*|ExecStart=$VENV_PYTHON -m uvicorn app:app --host 0.0.0.0 --port 8200|" /etc/systemd/system/westock-monitor.service
     sed -i "s|Environment=PATH=.*|Environment=PATH=$PROJECT_DIR/.venv/bin:/usr/local/bin:/usr/bin:/bin|" /etc/systemd/system/westock-monitor.service
+    # 采集参数写入 systemd（服务器资源有限，降并发防 CLI 超时；加大单次超时）
+    # 可通过环境变量覆盖：WESTOCK_WORKERS / WESTOCK_TIMEOUT / MINUTE_INTERVAL
+    _env_workers="${WESTOCK_WORKERS:-6}"    # 服务器默认 6 并发（本地 12 会争抢导致超时）
+    _env_timeout="${WESTOCK_TIMEOUT:-60}"   # 单次 CLI 超时加大到 60s（服务器网络慢）
+    sed -i "/Environment=PATH=.*/a Environment=WESTOCK_WORKERS=$_env_workers\nEnvironment=WESTOCK_TIMEOUT=$_env_timeout" /etc/systemd/system/westock-monitor.service
     sed -i "s|StandardOutput=.*|StandardOutput=append:$LOGDIR/backend.log|" /etc/systemd/system/westock-monitor.service
     sed -i "s|StandardError=.*|StandardError=append:$LOGDIR/backend.log|" /etc/systemd/system/westock-monitor.service
     systemctl daemon-reload
