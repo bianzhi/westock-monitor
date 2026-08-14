@@ -34,22 +34,26 @@ logger = logging.getLogger(__name__)
 def _ping_cli() -> Tuple[bool, str]:
     """活性探测：调 westock-data --help，返回 (ok, version)。
 
-    用 help 调用代替真实 fund flow，避免污染数据；超时 5s。
+    用 help 调用代替真实 fund flow，避免污染数据。
     注意：该 CLI 不支持 --version（返回非 0），--help 才是合法探活参数。
+    超时取 min(WESTOCK_TIMEOUT, 10)：服务器 CLI 慢（npx 解析 + 网络）时
+    5s 硬编码不够（实测 6.9s），但也不能太长拖慢 health 接口。
     用于 /api/health 数据源活性体检。
     """
+    # ping 超时：配置的 WESTOCK_TIMEOUT 与 10s 取较小值（health 轮询不能被拖死）
+    ping_timeout = min(WESTOCK_TIMEOUT, 10)
     try:
         result = subprocess.run(
             WESTOCK_CMD + ["--help"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            universal_newlines=True, timeout=5,
+            universal_newlines=True, timeout=ping_timeout,
         )
         if result.returncode == 0:
             ver = result.stdout.strip() or result.stderr.strip() or "ok"
             return True, ver[:80]
         return False, f"rc={result.returncode} {result.stderr.strip()[:100]}"
     except subprocess.TimeoutExpired:
-        return False, "timeout 5s"
+        return False, f"timeout {ping_timeout}s"
     except Exception as e:
         return False, str(e)[:100]
 
