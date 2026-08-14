@@ -100,12 +100,14 @@ if [ -f "$LOG" ]; then
     else
         _fail "concept flow 线程" "未启动（概念板块宽表将退化为请求时同步拉取）"
     fi
-    # 最近错误
-    RECENT_ERR=$(grep -E "ERROR|Traceback|NameError" "$LOG" | tail -3)
+    # 最近业务错误：排除 uvicorn/h11 的"非法请求行"（公网扫描器探测端口，
+    # 非业务 bug，天天有；只关注 app/collector/westock 等业务代码异常）
+    RECENT_ERR=$(grep -E "ERROR|Traceback|NameError" "$LOG" \
+        | grep -vE "h11|uvicorn.error|Invalid HTTP request" | tail -3)
     if [ -n "$RECENT_ERR" ]; then
-        _warn "最近日志有异常" "$(echo "$RECENT_ERR" | head -1)"
+        _warn "最近业务日志有异常" "$(echo "$RECENT_ERR" | head -1)"
     else
-        _ok "最近日志无 ERROR/Traceback"
+        _ok "最近业务日志无 ERROR/Traceback（仅外部扫描噪音不计）"
     fi
     # init_cache 状态
     if grep -q "preloaded, .* codes ready" "$LOG"; then
