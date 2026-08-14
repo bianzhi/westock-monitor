@@ -144,10 +144,16 @@ fi
 echo ""
 echo "⚙️  westock CLI"
 
-if command -v westock-data &>/dev/null; then
-    _ok "全局安装 westock-data 存在（跳过 npx 开销）"
+# 全局安装检测：多路径探测（nohup/systemd 环境 PATH 可能不含 npm 全局 bin，
+# 用 command -v 会误判；与 dev.sh 探测逻辑保持一致）
+_NPM_BIN=""
+for _cand in "$(npm prefix -g 2>/dev/null)/bin" /usr/local/bin /usr/bin; do
+    [ -x "$_cand/westock-data" ] && _NPM_BIN="$_cand" && break
+done
+if [ -n "$_NPM_BIN" ]; then
+    _ok "westock-data 已全局安装（$_NPM_BIN，跳过 npx 开销）"
 else
-    _warn "westock-data 未全局安装" "走 npx 每次解析包，慢且易超时，建议 npm install -g westock-data-skillhub@1.0.5"
+    _warn "westock-data 未全局安装" "走 npx 每次解析包，慢且易超时；./dev.sh 会自动安装，或手动 npm install -g westock-data-skillhub@1.0.5"
 fi
 
 # CLI 探活（--help 返回 0 即正常；macOS 无 timeout 命令时跳过超时保护）
