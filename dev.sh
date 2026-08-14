@@ -188,11 +188,32 @@ echo "✅ Python $(python3 --version)"
 echo "✅ Node.js $(node -v)"
 
 # 全局安装 westock-data（跳过 npx 启动开销 ~0.5s/次）
-if ! command -v westock-data &> /dev/null; then
+# 幂等：已安装则跳过；未安装/装失败时重试并显式提示（不静默吞错）
+# 注意：nohup/systemd 环境下 PATH 可能不含 npm 全局 bin，需检测常见路径
+_NPM_BIN=""
+for _cand in "$(npm prefix -g 2>/dev/null)/bin" /usr/local/bin /usr/bin; do
+    [ -x "$_cand/westock-data" ] && _NPM_BIN="$_cand" && break
+done
+if [ -n "$_NPM_BIN" ]; then
+    export PATH="$_NPM_BIN:$PATH"
+    echo "✅ westock-data $(westock-data --version 2>/dev/null || echo 'ok') (全局: $_NPM_BIN)"
+else
     echo "📦 全局安装 westock-data..."
-    npm install -g westock-data-skillhub@1.0.5 --silent
+    if npm install -g westock-data-skillhub@1.0.5; then
+        # 安装成功后刷新 PATH（当前 shell 可能看不到新 bin）
+        for _cand in "$(npm prefix -g 2>/dev/null)/bin" /usr/local/bin /usr/bin; do
+            [ -x "$_cand/westock-data" ] && _NPM_BIN="$_cand" && break
+        done
+        if [ -n "$_NPM_BIN" ]; then
+            export PATH="$_NPM_BIN:$PATH"
+            echo "✅ westock-data 全局安装完成 ($_NPM_BIN)"
+        else
+            echo "   ⚠️ 安装完成但找不到二进制，继续走 npx 降级（可接受，仅稍慢）"
+        fi
+    else
+        echo "   ⚠️ 全局安装失败（网络/权限），继续走 npx 降级（可接受，仅稍慢）"
+    fi
 fi
-echo "✅ westock-data $(westock-data --version 2>/dev/null || echo 'ok')"
 
 # ----------------------------------------------------------
 # 3. 编译前端
