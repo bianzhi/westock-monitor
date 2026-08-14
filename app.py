@@ -800,14 +800,15 @@ async def get_sector_detail(
     """单板块详情：近n日数据 + 强度判定"""
     storage = get_storage()
 
-    # 概念板块：实时 fund_flow（无日级缓存）
+    # 概念板块：读后台 concept_flow 缓存（45s 刷新），不在此同步调 CLI
     if code.startswith("pt02"):
         from concept_sectors import get_default_name
-        from westock import fund_flow as _ff, extract_main_net_flow as _emnf
-        flow_records = _ff([code], raw=True)
-        if not flow_records:
+        from westock import extract_main_net_flow as _emnf
+        with _concept_flow_lock:
+            _cflow = _concept_flow_cache.get("flow_map", {}).get(code, {})
+        if not _cflow:
             raise HTTPException(status_code=404, detail=f"concept sector {code} not found")
-        flow = flow_records[0]
+        flow = _cflow
         today_net = _emnf(flow)
         metrics = calc_sector_metrics(flow, TURNOVER_METHOD) if flow else {}
         today_turnover = metrics.get("turnover")
@@ -873,29 +874,7 @@ async def get_sector_minute(
         trade_date = date.today().strftime("%Y%m%d")
 
     deltas = storage.get_minute_deltas(code, trade_date)
-
-    # 概念板块：无分钟采集数据，fund_flow 实时快照兜底
-    if not deltas and code.startswith("pt02"):
-        try:
-            from westock import fund_flow as _ff, extract_main_net_flow as _emnf
-            flow_records = _ff([code], raw=True)
-            if flow_records:
-                flow = flow_records[0]
-                mnf = _emnf(flow)
-                now_ts = datetime.now()
-                deltas = [{
-                    "timestamp": now_ts.isoformat(),
-                    "main_net_flow": mnf,
-                    "minute_delta": 0,
-                    "turnover": None,
-                    "turnover_delta": None,
-                    "is_open_anchor": 0,
-                    "circ_mv": None,
-                    "main_inflow": None,
-                    "main_outflow": None,
-                }]
-        except Exception as e:
-            logger.debug("get_sector_minute concept fallback failed: %s", e)
+    # 采集由后台线程负责，API 只读库；数据库无分钟数据则返回空（前端展示暂无数据）
     meta = storage.get_sector_meta(code)
 
     points = []
@@ -1001,27 +980,20 @@ async def get_minute_compare(
     if method == "manual" and codes:
         selected = [c.strip() for c in codes.split(",") if c.strip()]
     elif method == "rank":
-        # 按今日净流入倒序
-        from westock import fund_flow
+        # 按今日净流入倒序 —— API 只读缓存/数据库，采集由后台线程负责
         if source == "concept":
-            flow_records = fund_flow(all_codes, raw=True)
-            flow_map = {r.get("code") or r.get("SecuCode"): r for r in flow_records if r}
+            # 读后台 concept_flow 缓存（45s 刷新），不在此同步调 CLI
+            with _concept_flow_lock:
+                flow_map = _concept_flow_cache.get("flow_map", {})
             def _sf(v):
                 if v is None or v == "": return None
                 try: return float(v)
                 except (TypeError, ValueError): return None
             ranked = [(c, _sf(flow_map.get(c, {}).get("MainNetFlow")) or 0) for c in all_codes]
         else:
+            # 读 data_cache 日级数据；缓存未就绪时用 0 值（采集线程会填）
             daily_map = get_daily_map()
-            if daily_map:
-                ranked = [(c, (daily_map.get(c, [{}])[0].get("net_flow") or 0)) for c in all_codes]
-            else:
-                # 缓存未就绪：降级用 fund_flow 实时排名
-                logger.info("get_minute_compare: daily_map empty, falling back to fund_flow for ranking")
-                from westock import extract_main_net_flow as _emnf
-                flow_records = fund_flow(all_codes, raw=True)
-                flow_map = {r.get("code") or r.get("SecuCode"): r for r in flow_records if r}
-                ranked = [(c, _emnf(flow_map.get(c, {})) or 0) for c in all_codes]
+            ranked = [(c, (daily_map.get(c, [{}])[0].get("net_flow") or 0)) for c in all_codes]
         ranked.sort(key=lambda x: x[1], reverse=True)
         ordered_codes = [c for c, _ in ranked]
         selected = ordered_codes[start - 1:end]
@@ -1030,32 +1002,8 @@ async def get_minute_compare(
         selected = ordered_codes[start - 1:end]
 
     # 批量拿分钟数据（采集由后台统一线程负责，API 只读不写）
+    # 数据库无数据时返回空，前端展示"暂无数据"——不在此调 CLI 兜底
     deltas_map = storage.get_minute_deltas_batch(selected, trade_date)
-
-    # 分钟数据全空时兜底：调 fund_flow 拿至少一个实时快照点
-    all_empty = all(len(v) == 0 for v in deltas_map.values())
-    if all_empty and selected:
-        logger.info("get_minute_compare: no minute data in storage, falling back to fund_flow snapshot")
-        try:
-            from westock import fund_flow as _ff, extract_main_net_flow as _emnf
-            flow_records = _ff(selected, raw=True)
-            flow_map = {r.get("code") or r.get("SecuCode"): r for r in flow_records}
-            now_ts = datetime.now()
-            now_iso = now_ts.isoformat()
-            for code in selected:
-                flow = flow_map.get(code, {})
-                mnf = _emnf(flow)
-                deltas_map[code] = [{
-                    "timestamp": now_iso,
-                    "main_net_flow": mnf,
-                    "minute_delta": 0,        # 快照无差分数据，填 0 避免前端"每分钟"模式全过滤
-                    "turnover": None,
-                    "turnover_delta": None,
-                    "is_open_anchor": 0,      # 非真实开盘锚点，允许前端渲染
-                }]
-            logger.info("get_minute_compare: fund_flow snapshot ok, %d codes", len(flow_map))
-        except Exception as e:
-            logger.warning("get_minute_compare: fund_flow fallback failed: %s", e)
 
     series = []
     for code in selected:
