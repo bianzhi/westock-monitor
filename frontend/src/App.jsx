@@ -117,7 +117,7 @@ export default function App() {
     }
   }, []);
 
-  const loadConceptSectors = useCallback(async () => {
+  const loadConceptSectors = useCallback(async (force = false) => {
     setConceptLoading(true);
     const MAX_RETRIES = 5;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -354,9 +354,10 @@ export default function App() {
   }, [detailCode, health?.trading]);
 
   // 加载一级行业聚合数据
-  const loadL1Summary = useCallback(async () => {
-    // 已缓存且 n 没变 → 跳过（切 Tab 不重复请求）
-    if (l1Data.length > 0 && l1LoadedN.current === n) return;
+  // force=true 时跳过本地缓存判断，切 Tab 保证拉到最新
+  const loadL1Summary = useCallback(async (force = false) => {
+    // 非强制且已缓存且 n 没变 → 跳过（避免无谓请求）
+    if (!force && l1Data.length > 0 && l1LoadedN.current === n) return;
     setL1Loading(true);
     try {
       const data = await fetchL1Summary(n);
@@ -369,15 +370,19 @@ export default function App() {
     }
   }, [n, l1Data.length]);
 
-  // Tab 切换时加载对应数据
+  // Tab 切换时加载对应数据：切到哪个 Tab 就强制拉最新（静默），
+  // 保证切回 Tab 展示的是最新数据而非旧缓存
   useEffect(() => {
     if (activeTab === "l1") {
-      loadL1Summary();
+      loadL1Summary(true);   // force：跳过 l1LoadedN 缓存
     }
-    if (activeTab === "concept" && conceptSectors.length === 0) {
-      loadConceptSectors();
+    if (activeTab === "concept") {
+      loadConceptSectors();  // 总是重拉（后端有 45s flow 缓存兜底，成本低）
     }
-  }, [activeTab, loadL1Summary, loadConceptSectors, conceptSectors.length]);
+    if (activeTab === "l2") {
+      loadSectors(false, true);  // 静默刷新 l2 宽表
+    }
+  }, [activeTab, loadL1Summary, loadConceptSectors, loadSectors]);
 
   // 自选置顶排序：watchlist 里的板块排前面，顺序同 watchlist；其余原序
   const sectorsSorted = useMemo(() => {
