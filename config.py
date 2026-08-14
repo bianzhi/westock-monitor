@@ -26,8 +26,9 @@ import shutil
 # westock-data CLI 配置
 # ============================================================
 WESTOCK_PKG = os.getenv("WESTOCK_PKG", "westock-data-skillhub@1.0.5")
-# 优先使用全局安装的二进制（跳过 npx 启动开销 ~0.5s/次），未安装则降级 npx
-_WESTOCK_BIN = shutil.which("westock-data")
+# 优先使用全局安装的二进制（跳过 npx 启动开销），未安装则降级 npx。
+# 注意：该 npm 包的 bin 名是 westock-data-skillhub（非 westock-data）。
+_WESTOCK_BIN = shutil.which("westock-data-skillhub") or shutil.which("westock-data")
 if _WESTOCK_BIN:
     WESTOCK_CMD = [_WESTOCK_BIN]
 else:

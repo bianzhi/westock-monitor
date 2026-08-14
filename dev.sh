@@ -189,24 +189,34 @@ echo "✅ Node.js $(node -v)"
 
 # 全局安装 westock-data（跳过 npx 启动开销 ~0.5s/次）
 # 幂等：已安装则跳过；未安装/装失败时重试并显式提示（不静默吞错）
-# 注意：nohup/systemd 环境下 PATH 可能不含 npm 全局 bin，需检测常见路径
-_NPM_BIN=""
-for _cand in "$(npm prefix -g 2>/dev/null)/bin" /usr/local/bin /usr/bin; do
-    [ -x "$_cand/westock-data" ] && _NPM_BIN="$_cand" && break
-done
+# 注意：该 npm 包的 bin 名是 westock-data-skillhub（非 westock-data），
+# 且 nvm 环境下 bin 在 ~/.nvm/.../bin，必须用 `npm bin -g` 获取真实路径。
+_WESTOCK_BIN_NAME="westock-data-skillhub"
+_npm_bin_dir() {
+    local d=""
+    d=$(npm bin -g 2>/dev/null || true)
+    if [ -n "$d" ] && [ -x "$d/$_WESTOCK_BIN_NAME" ]; then
+        echo "$d"; return 0
+    fi
+    for _cand in "$(npm prefix -g 2>/dev/null)/bin" /usr/local/bin /usr/bin; do
+        if [ -x "$_cand/$_WESTOCK_BIN_NAME" ]; then
+            echo "$_cand"; return 0
+        fi
+    done
+    return 1
+}
+_NPM_BIN=$(_npm_bin_dir || true)
 if [ -n "$_NPM_BIN" ]; then
     export PATH="$_NPM_BIN:$PATH"
-    echo "✅ westock-data $(westock-data --version 2>/dev/null || echo 'ok') (全局: $_NPM_BIN)"
+    echo "✅ westock-data-skillhub $(westock-data-skillhub --version 2>/dev/null || echo 'ok') (全局: $_NPM_BIN)"
 else
-    echo "📦 全局安装 westock-data..."
+    echo "📦 全局安装 westock-data-skillhub..."
     if npm install -g westock-data-skillhub@1.0.5; then
         # 安装成功后刷新 PATH（当前 shell 可能看不到新 bin）
-        for _cand in "$(npm prefix -g 2>/dev/null)/bin" /usr/local/bin /usr/bin; do
-            [ -x "$_cand/westock-data" ] && _NPM_BIN="$_cand" && break
-        done
+        _NPM_BIN=$(_npm_bin_dir || true)
         if [ -n "$_NPM_BIN" ]; then
             export PATH="$_NPM_BIN:$PATH"
-            echo "✅ westock-data 全局安装完成 ($_NPM_BIN)"
+            echo "✅ westock-data-skillhub 全局安装完成 ($_NPM_BIN)"
         else
             echo "   ⚠️ 安装完成但找不到二进制，继续走 npx 降级（可接受，仅稍慢）"
         fi
