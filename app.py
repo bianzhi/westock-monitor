@@ -566,6 +566,25 @@ def _concept_flow_loop():
         _t.sleep(CONCEPT_FLOW_TTL_SEC)
 
 
+def _collector_supervisor():
+    """守护采集线程：collector_loop 是 daemon 线程，若意外异常退出
+    （外层无 try 保护时线程直接死亡），systemd 不会感知（它只管主进程）。
+    本 supervisor 每轮启动一个 collector 子线程并 join，线程退出后
+    记录错误并 10s 后自动重启，保证采集永不中断。
+    """
+    import time as _t
+    while True:
+        try:
+            from collector import run_collector_loop
+            t = threading.Thread(target=run_collector_loop, daemon=True, name="collector")
+            t.start()
+            t.join()  # 阻塞直到 collector 线程退出（正常永不退出）
+        except Exception as e:
+            logger.error("collector thread exited unexpectedly: %s", e, exc_info=True)
+        logger.error("collector thread died, restarting in 10s...")
+        _t.sleep(10)
+
+
 @app.get("/api/sectors/concept", response_model=SectorListResponse)
 async def get_concept_sectors(
     n: int = Query(STRENGTH_WINDOW_N, description="强度判定窗口"),
@@ -1665,9 +1684,9 @@ try:
         logger.info("app startup complete (cache loading in background)")
 
         # 启动统一自适应采集线程（聚焦 8s / 全量 60s，单一线程无竞争）
-        from collector import run_collector_loop
-        threading.Thread(target=run_collector_loop, daemon=True, name="collector").start()
-        logger.info("collector loop started")
+        # 由 supervisor 守护：线程异常退出后 10s 自动重启，保证采集永不中断
+        threading.Thread(target=_collector_supervisor, daemon=True, name="collector_sup").start()
+        logger.info("collector supervisor started")
 
         # 启动概念板块全量 flow 后台缓存线程（API 秒回，刷新不阻塞单 worker）
         threading.Thread(target=_concept_flow_loop, daemon=True, name="concept_flow").start()
@@ -1735,9 +1754,9 @@ except ImportError:
         logger.info("app startup complete (cache loading in background)")
 
         # 启动统一自适应采集线程（聚焦 8s / 全量 60s，单一线程无竞争）
-        from collector import run_collector_loop
-        threading.Thread(target=run_collector_loop, daemon=True, name="collector").start()
-        logger.info("collector loop started")
+        # 由 supervisor 守护：线程异常退出后 10s 自动重启，保证采集永不中断
+        threading.Thread(target=_collector_supervisor, daemon=True, name="collector_sup").start()
+        logger.info("collector supervisor started")
 
         # 启动概念板块全量 flow 后台缓存线程（API 秒回，刷新不阻塞单 worker）
         threading.Thread(target=_concept_flow_loop, daemon=True, name="concept_flow").start()
