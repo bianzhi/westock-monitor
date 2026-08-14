@@ -566,23 +566,52 @@ def _concept_flow_loop():
         _t.sleep(CONCEPT_FLOW_TTL_SEC)
 
 
-def _collector_supervisor():
-    """守护采集线程：collector_loop 是 daemon 线程，若意外异常退出
-    （外层无 try 保护时线程直接死亡），systemd 不会感知（它只管主进程）。
-    本 supervisor 每轮启动一个 collector 子线程并 join，线程退出后
-    记录错误并 10s 后自动重启，保证采集永不中断。
+def _collector_loop_entry():
+    """collector 线程入口（延迟导入，供守护器使用）。"""
+    from collector import run_collector_loop
+    run_collector_loop()
+
+
+def _supervise_thread(target, name: str, restart_delay: int = 10,
+                      restart_on_exit: bool = True) -> None:
+    """统一线程守护器：被守护线程异常退出后自动重启。
+
+    原子执行单元 = 线程。任何 daemon 线程若因未捕获异常退出，
+    systemd 不会感知（它只管主进程），需在此层兜底。
+    用 wrapper 捕获线程内异常（t.join() 不传播线程内部异常，
+    无法直接区分正常返回/异常退出）。
+
+    Args:
+        target: 线程目标函数
+        name: 线程名（日志用）
+        restart_delay: 异常退出后重启间隔（秒）
+        restart_on_exit: True=常驻线程（任何退出都重启）；
+                         False=任务型线程（正常完成不重启，异常才重启）
     """
     import time as _t
     while True:
-        try:
-            from collector import run_collector_loop
-            t = threading.Thread(target=run_collector_loop, daemon=True, name="collector")
-            t.start()
-            t.join()  # 阻塞直到 collector 线程退出（正常永不退出）
-        except Exception as e:
-            logger.error("collector thread exited unexpectedly: %s", e, exc_info=True)
-        logger.error("collector thread died, restarting in 10s...")
-        _t.sleep(10)
+        state: Dict[str, Any] = {"error": None}
+
+        def _wrap():
+            try:
+                target()
+            except Exception as e:  # noqa: BLE001
+                state["error"] = e
+
+        t = threading.Thread(target=_wrap, daemon=True, name=name)
+        t.start()
+        t.join()  # 阻塞直到线程退出（常驻线程正常永不退出）
+
+        if not restart_on_exit and state["error"] is None:
+            # 任务型线程正常完成 → 不重启
+            logger.info("%s thread finished normally", name)
+            return
+        if state["error"] is not None:
+            logger.error("%s thread died: %s, restarting in %ds...",
+                         name, state["error"], restart_delay)
+        else:
+            logger.error("%s thread exited, restarting in %ds...", name, restart_delay)
+        _t.sleep(restart_delay)
 
 
 @app.get("/api/sectors/concept", response_model=SectorListResponse)
@@ -1680,17 +1709,17 @@ try:
 
             logger.error("data_cache: all %d init_cache attempts FAILED, giving up", max_retries)
 
-        threading.Thread(target=_bg_init, daemon=True, name="startup_init").start()
-        logger.info("app startup complete (cache loading in background)")
-
-        # 启动统一自适应采集线程（聚焦 8s / 全量 60s，单一线程无竞争）
-        # 由 supervisor 守护：线程异常退出后 10s 自动重启，保证采集永不中断
-        threading.Thread(target=_collector_supervisor, daemon=True, name="collector_sup").start()
-        logger.info("collector supervisor started")
-
-        # 启动概念板块全量 flow 后台缓存线程（API 秒回，刷新不阻塞单 worker）
-        threading.Thread(target=_concept_flow_loop, daemon=True, name="concept_flow").start()
-        logger.info("concept flow cache loop started")
+        # 启动后台线程，统一由守护器保护（异常退出自动重启）：
+        #  - startup_init: 任务型（预热完成正常返回不重启，异常才重启）
+        #  - collector: 常驻采集线程，退出即重启
+        #  - concept_flow: 常驻概念 flow 缓存线程，退出即重启
+        threading.Thread(target=_supervise_thread, daemon=True, name="sup_startup",
+                         args=(_bg_init, "startup_init", 10, False)).start()
+        threading.Thread(target=_supervise_thread, daemon=True, name="sup_collector",
+                         args=(_collector_loop_entry, "collector", 10, True)).start()
+        threading.Thread(target=_supervise_thread, daemon=True, name="sup_concept_flow",
+                         args=(_concept_flow_loop, "concept_flow", 10, True)).start()
+        logger.info("thread supervisors started (startup_init/collector/concept_flow)")
 
         yield  # 应用运行中...
 
@@ -1750,17 +1779,17 @@ except ImportError:
 
             logger.error("data_cache: all %d init_cache attempts FAILED, giving up", max_retries)
 
-        threading.Thread(target=_bg_init, daemon=True, name="startup_init").start()
-        logger.info("app startup complete (cache loading in background)")
-
-        # 启动统一自适应采集线程（聚焦 8s / 全量 60s，单一线程无竞争）
-        # 由 supervisor 守护：线程异常退出后 10s 自动重启，保证采集永不中断
-        threading.Thread(target=_collector_supervisor, daemon=True, name="collector_sup").start()
-        logger.info("collector supervisor started")
-
-        # 启动概念板块全量 flow 后台缓存线程（API 秒回，刷新不阻塞单 worker）
-        threading.Thread(target=_concept_flow_loop, daemon=True, name="concept_flow").start()
-        logger.info("concept flow cache loop started")
+        # 启动后台线程，统一由守护器保护（异常退出自动重启）：
+        #  - startup_init: 任务型（预热完成正常返回不重启，异常才重启）
+        #  - collector: 常驻采集线程，退出即重启
+        #  - concept_flow: 常驻概念 flow 缓存线程，退出即重启
+        threading.Thread(target=_supervise_thread, daemon=True, name="sup_startup",
+                         args=(_bg_init, "startup_init", 10, False)).start()
+        threading.Thread(target=_supervise_thread, daemon=True, name="sup_collector",
+                         args=(_collector_loop_entry, "collector", 10, True)).start()
+        threading.Thread(target=_supervise_thread, daemon=True, name="sup_concept_flow",
+                         args=(_concept_flow_loop, "concept_flow", 10, True)).start()
+        logger.info("thread supervisors started (startup_init/collector/concept_flow)")
 
 
 # ============================================================
