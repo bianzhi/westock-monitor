@@ -531,6 +531,20 @@ export default function App() {
       key: "consecutive",
       width: 90,
       sorter: (a, b) => (a.consecutive_inflow_days ?? 0) - (b.consecutive_inflow_days ?? 0),
+      // 下拉筛选（与排序并存）：按连续流入天数分档
+      filters: [
+        { text: "≥5 天", value: 5 },
+        { text: "3-4 天", value: 3 },
+        { text: "1-2 天", value: 1 },
+        { text: "0 天", value: 0 },
+      ],
+      onFilter: (value, r) => {
+        const n = r.consecutive_inflow_days ?? 0;
+        if (value === 5) return n >= 5;
+        if (value === 3) return n >= 3 && n <= 4;
+        if (value === 1) return n >= 1 && n <= 2;
+        return n === 0;
+      },
       render: (_, r) => r.consecutive_inflow_days > 0 ? (
         <span style={{ color: "#e74c3c", fontWeight: 600 }}>
           {r.consecutive_inflow_days} 天
@@ -599,6 +613,15 @@ export default function App() {
       width: 110,
       // 兜底 undefined：strength_value 缺失时按极值排（与今日净流入列一致）
       sorter: (a, b) => (a.strength_value ?? -1e18) - (b.strength_value ?? -1e18),
+      // 下拉筛选（与排序并存）：按强度档位
+      filters: [
+        { text: "强", value: "强" },
+        { text: "偏强", value: "偏强" },
+        { text: "普通", value: "普通" },
+        { text: "偏弱", value: "偏弱" },
+        { text: "弱", value: "弱" },
+      ],
+      onFilter: (value, r) => r.strength_level === value,
       render: (_, r) => (
         <StrengthTag level={r.strength_level} value={r.strength_value} />
       ),
