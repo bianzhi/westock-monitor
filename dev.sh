@@ -332,6 +332,22 @@ else
     echo "   ⚠️  采集线程未检测到"
 fi
 
+# systemd 模式：验证保活机制（服务 active + 开机自启 enabled）
+if $USE_SYSTEMD; then
+    if systemctl is-active --quiet westock-monitor; then
+        echo "   ✅ systemd 服务 active（Restart=always 保活已生效）"
+    else
+        echo "   ❌ systemd 服务未 active！保活失效，请查 journalctl -u westock-monitor"
+        ok=false
+    fi
+    if systemctl is-enabled --quiet westock-monitor; then
+        echo "   ✅ systemd 开机自启 enabled（交易时段自动恢复采集）"
+    else
+        echo "   ⚠️  systemd 开机自启未 enabled，重启机器后不会自动恢复采集"
+        ok=false
+    fi
+fi
+
 echo ""
 echo "============================================"
 if $ok; then

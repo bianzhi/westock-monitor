@@ -1,6 +1,9 @@
 [Unit]
 Description=Westock Monitor (FastAPI 板块资金流监控)
 After=network.target
+# 禁用启动频率限制：反复崩溃也不放弃重启，确保交易时段进程始终存活
+StartLimitIntervalSec=0
+StartLimitBurst=0
 
 [Service]
 Type=simple
