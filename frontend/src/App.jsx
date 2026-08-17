@@ -420,6 +420,33 @@ export default function App() {
 
   // 表格列定义（useMemo 避免每次渲染重建引用导致 Table 闪烁）
   // watchlist 进 deps：勾选状态变了列渲染要更新；置顶排序在 dataSource 处理
+  //
+  // 动态下拉筛选：统计当前 Tab 数据里各强度档位 / 连续流入天数的实际分布，
+  // 下拉只显示存在的值并在值后标注个数（如「强 (5)」）。两个 Tab 共用 columns，
+  // 故统计基于当前活跃 Tab 的 dataSource。
+  const strengthDist = useMemo(() => {
+    const rows = activeTab === "concept" ? conceptSectors : sectorsSorted;
+    const dist = {};
+    rows.forEach((r) => {
+      const lv = r.strength_level;
+      if (lv) dist[lv] = (dist[lv] || 0) + 1;
+    });
+    return dist;
+  }, [activeTab, conceptSectors, sectorsSorted]);
+
+  const consecutiveDist = useMemo(() => {
+    const rows = activeTab === "concept" ? conceptSectors : sectorsSorted;
+    const dist = { "0": 0, "1-2": 0, "3-4": 0, "5+": 0 };
+    rows.forEach((r) => {
+      const n = r.consecutive_inflow_days ?? 0;
+      if (n >= 5) dist["5+"] += 1;
+      else if (n >= 3) dist["3-4"] += 1;
+      else if (n >= 1) dist["1-2"] += 1;
+      else dist["0"] += 1;
+    });
+    return dist;
+  }, [activeTab, conceptSectors, sectorsSorted]);
+
   const columns = useMemo(() => [
     {
       title: "★",
@@ -531,18 +558,18 @@ export default function App() {
       key: "consecutive",
       width: 90,
       sorter: (a, b) => (a.consecutive_inflow_days ?? 0) - (b.consecutive_inflow_days ?? 0),
-      // 下拉筛选（与排序并存）：按连续流入天数分档
+      // 下拉筛选（与排序并存）：按连续流入天数分档，动态显示实际分布及个数
       filters: [
-        { text: "≥5 天", value: 5 },
-        { text: "3-4 天", value: 3 },
-        { text: "1-2 天", value: 1 },
-        { text: "0 天", value: 0 },
+        { text: `≥5 天 (${consecutiveDist["5+"]})`, value: "5+" },
+        { text: `3-4 天 (${consecutiveDist["3-4"]})`, value: "3-4" },
+        { text: `1-2 天 (${consecutiveDist["1-2"]})`, value: "1-2" },
+        { text: `0 天 (${consecutiveDist["0"]})`, value: "0" },
       ],
       onFilter: (value, r) => {
         const n = r.consecutive_inflow_days ?? 0;
-        if (value === 5) return n >= 5;
-        if (value === 3) return n >= 3 && n <= 4;
-        if (value === 1) return n >= 1 && n <= 2;
+        if (value === "5+") return n >= 5;
+        if (value === "3-4") return n >= 3 && n <= 4;
+        if (value === "1-2") return n >= 1 && n <= 2;
         return n === 0;
       },
       render: (_, r) => r.consecutive_inflow_days > 0 ? (
@@ -613,20 +640,17 @@ export default function App() {
       width: 110,
       // 兜底 undefined：strength_value 缺失时按极值排（与今日净流入列一致）
       sorter: (a, b) => (a.strength_value ?? -1e18) - (b.strength_value ?? -1e18),
-      // 下拉筛选（与排序并存）：按强度档位
-      filters: [
-        { text: "强", value: "强" },
-        { text: "偏强", value: "偏强" },
-        { text: "普通", value: "普通" },
-        { text: "偏弱", value: "偏弱" },
-        { text: "弱", value: "弱" },
-      ],
+      // 下拉筛选（与排序并存）：按强度档位，动态显示实际分布及个数
+      filters: Object.entries(strengthDist).map(([lv, cnt]) => ({
+        text: `${lv} (${cnt})`,
+        value: lv,
+      })),
       onFilter: (value, r) => r.strength_level === value,
       render: (_, r) => (
         <StrengthTag level={r.strength_level} value={r.strength_value} />
       ),
     },
-  ], [watchlist, search, toggleWatchlist, loadDetail]);
+  ], [watchlist, search, toggleWatchlist, loadDetail, strengthDist, consecutiveDist]);
 
   // 行展开内容
   const expandedRowRender = (record) => (
