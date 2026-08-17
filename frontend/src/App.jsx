@@ -1003,6 +1003,16 @@ export default function App() {
               label: `概念板块 (${conceptSectors.length})`,
               children: (
                 <Card title="概念板块宽表" style={{ marginBottom: 16 }}>
+                  <Space style={{ marginBottom: 12 }}>
+                    <Input.Search
+                      placeholder="搜索概念板块名称/代码（实时筛选）"
+                      allowClear
+                      value={searchText}
+                      onChange={handleSearchChange}
+                      onSearch={setSearch}
+                      style={{ width: 260 }}
+                    />
+                  </Space>
                   <Table
                     rowKey="code"
                     columns={columns}
