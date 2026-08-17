@@ -44,6 +44,10 @@ export default function App() {
   const [l1Loading, setL1Loading] = useState(false);
   const l1LoadedN = useRef(null);  // 记录上次加载的 n 值，避免重复请求
   const [pageSize, setPageSize] = useState(50);
+  const [pageNum, setPageNum] = useState(1);
+  // 筛选受控状态：columns 每次重建（30s 自动刷新）时保留，不因引用变化重置
+  const [strengthFilter, setStrengthFilter] = useState([]);
+  const [consecutiveFilter, setConsecutiveFilter] = useState([]);
 
   // 概念板块
   const [conceptSectors, setConceptSectors] = useState([]);
@@ -565,6 +569,9 @@ export default function App() {
         { text: `1-2 天 (${consecutiveDist["1-2"]})`, value: "1-2" },
         { text: `0 天 (${consecutiveDist["0"]})`, value: "0" },
       ],
+      // 受控筛选：columns 重建（30s 刷新）时保留选中值，不重置
+      filteredValue: consecutiveFilter,
+      onFilterChange: (vals) => setConsecutiveFilter(vals),
       onFilter: (value, r) => {
         const n = r.consecutive_inflow_days ?? 0;
         if (value === "5+") return n >= 5;
@@ -645,6 +652,9 @@ export default function App() {
         text: `${lv} (${cnt})`,
         value: lv,
       })),
+      // 受控筛选：columns 重建（30s 刷新）时保留选中值，不重置
+      filteredValue: strengthFilter,
+      onFilterChange: (vals) => setStrengthFilter(vals),
       onFilter: (value, r) => r.strength_level === value,
       render: (_, r) => (
         <StrengthTag level={r.strength_level} value={r.strength_value} />
@@ -907,12 +917,13 @@ export default function App() {
                       scroll={{ x: 1400 }}
                       expandable={{ expandedRowRender, rowExpandable: () => true }}
                       pagination={{
+                        current: pageNum,
                         pageSize,
                         showSizeChanger: true,
                         pageSizeOptions: [20, 50, 100],
                         showTotal: (total) => `共 ${total} 个板块`,
-                        onChange: (page, size) => setPageSize(size),
-                        onShowSizeChange: (_, size) => setPageSize(size),
+                        onChange: (page, size) => { setPageNum(page); setPageSize(size); },
+                        onShowSizeChange: (_, size) => { setPageNum(1); setPageSize(size); },
                       }}
                     />
                   </Card>
@@ -1070,8 +1081,11 @@ export default function App() {
                     scroll={{ x: 1400 }}
                     expandable={{ expandedRowRender, rowExpandable: () => true }}
                     pagination={{
+                      current: pageNum,
                       pageSize: 50, showSizeChanger: true, pageSizeOptions: [20, 50, 100],
                       showTotal: (total) => `共 ${total} 个概念板块`,
+                      onChange: (page, size) => { setPageNum(page); setPageSize(size); },
+                      onShowSizeChange: (_, size) => { setPageNum(1); setPageSize(size); },
                     }}
                   />
                 </Card>
