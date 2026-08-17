@@ -194,6 +194,24 @@ class Storage:
                 ON concept_daily(trade_date)
             """)
 
+            # 全板块日级净流入表（pt018 二级 + pt02 概念统一记录，日线图数据源）
+            # 保留近 30 个交易日；与 concept_daily 并存（后者是概念板块专用，
+            # 由概念快照写入；sector_daily 是通用表，供日线图查询）
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS sector_daily (
+                    code            TEXT NOT NULL,
+                    name            TEXT,
+                    trade_date      TEXT NOT NULL,      -- YYYYMMDD
+                    net_flow        REAL,               -- 当日主力净流入(元)
+                    turnover        REAL,               -- 当日成交额(元)
+                    PRIMARY KEY (code, trade_date)
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sector_daily_date
+                ON sector_daily(trade_date)
+            """)
+
             conn.commit()
         logger.info("storage initialized: %s", self.db_path)
 
@@ -802,6 +820,80 @@ class Storage:
             conn.commit()
         if deleted:
             logger.info("concept_daily: cleaned %d old records", deleted)
+        return deleted
+
+    # ============================================================
+    # 全板块日级净流入（sector_daily，日线图数据源，保留近 30 交易日）
+    # ============================================================
+    def upsert_sector_daily_batch(self, records: List[Dict]) -> int:
+        """批量写入全板块日净流入（按 code + trade_date 去重）。
+
+        Args:
+            records: [{code, name, trade_date(YYYYMMDD), net_flow(元), turnover(元)}, ...]
+
+        Returns:
+            写入行数
+        """
+        if not records:
+            return 0
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            count = 0
+            for r in records:
+                try:
+                    cur.execute(
+                        """INSERT OR REPLACE INTO sector_daily
+                           (code, name, trade_date, net_flow, turnover)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (r["code"], r.get("name"), r["trade_date"],
+                         r.get("net_flow"), r.get("turnover")),
+                    )
+                    count += 1
+                except sqlite3.Error as e:
+                    logger.warning("sector_daily upsert %s: %s", r.get("code"), e)
+            conn.commit()
+        logger.info("sector_daily: upserted %d records", count)
+        return count
+
+    def get_sector_daily_batch(self, codes: List[str], days: int = 30) -> Dict[str, List[Dict]]:
+        """批量获取板块近 N 交易日净流入记录（日线图数据源）。
+
+        Returns:
+            {code: [{trade_date, net_flow, turnover}, ...]}（trade_date 倒序）
+        """
+        if not codes:
+            return {}
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            placeholders = ",".join("?" * len(codes))
+            cur.execute(
+                f"""SELECT code, name, trade_date, net_flow, turnover
+                    FROM sector_daily
+                    WHERE code IN ({placeholders})
+                    ORDER BY trade_date DESC
+                    LIMIT ?""",
+                codes + [days * len(codes)],  # 宽松上限
+            )
+            result: Dict[str, List[Dict]] = {c: [] for c in codes}
+            for row in cur.fetchall():
+                d = dict(row)
+                result[d["code"]].append(d)
+            return result
+
+    def cleanup_sector_daily(self, keep_days: int = 30) -> int:
+        """清理超过 keep_days 天的全板块日净流入记录。"""
+        from datetime import date, timedelta
+        cutoff = (date.today() - timedelta(days=keep_days)).strftime("%Y%m%d")
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            cur.execute("DELETE FROM sector_daily WHERE trade_date < ?", (cutoff,))
+            deleted = cur.rowcount
+            conn.commit()
+        if deleted:
+            logger.info("sector_daily: cleaned %d old records", deleted)
         return deleted
 
     # ============================================================

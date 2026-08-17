@@ -992,6 +992,50 @@ async def get_realtime_minute(
     }
 
 
+@app.get("/api/sector-daily-history")
+async def get_sector_daily_history(
+    codes: str = Query(..., description="板块代码，逗号分隔（如 pt01801081,pt02003800）"),
+    days: int = Query(30, ge=1, le=60, description="近 N 交易日"),
+):
+    """板块日级净流入折线图数据源（读取 sector_daily 表，采集线程落库）。
+
+    Args:
+        codes: 板块代码列表（逗号分隔）
+        days: 近 N 交易日（默认 30，≤60）
+
+    Returns:
+        {"days": N, "series": [{code, name, points: [{trade_date, net_flow_yi, turnover_yi}, ...]}]}
+        points 按 trade_date 升序（折线图从左到右）。
+    """
+    storage = get_storage()
+    code_list = [c.strip() for c in codes.split(",") if c.strip()]
+    if not code_list:
+        return {"days": days, "series": []}
+
+    # 读取最近 days 个交易日记录（get_sector_daily_batch 按 trade_date 倒序）
+    data_map = storage.get_sector_daily_batch(code_list, days=days)
+
+    series = []
+    for code in code_list:
+        recs = data_map.get(code, [])
+        # 倒序 → 升序，供折线图从左到右
+        recs_sorted = sorted(recs, key=lambda r: r["trade_date"])
+        points = [{
+            "trade_date": r["trade_date"],
+            "net_flow_yi": _to_yi(r.get("net_flow")),
+            "turnover_yi": _to_yi(r.get("turnover")),
+        } for r in recs_sorted]
+        name = recs[0].get("name") if recs else code
+        series.append({
+            "code": code,
+            "name": name,
+            "points": points,
+            "point_count": len(points),
+        })
+
+    return {"days": days, "series": series}
+
+
 @app.get("/api/minute/compare")
 async def get_minute_compare(
     method: str = Query("rank", description="排序方式: rank=按今日净流入排名 / code=按板块编号 / manual=手动指定"),

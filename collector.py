@@ -400,6 +400,87 @@ def collect_concept_daily_snapshot() -> Dict[str, Any]:
     return {"saved": 0, "trade_date": today, "elapsed": round(elapsed, 1)}
 
 
+# 全板块日快照去重标记（每天只存一次，与概念快照独立）
+_sector_daily_snapshot_date: str = ""
+_SECTOR_DAILY_KEEP = 30  # 保留近 30 交易日
+
+
+def collect_sector_daily_snapshot() -> Dict[str, Any]:
+    """收盘后采集全板块（pt018 二级 + pt02 概念）当日净流入，写入 sector_daily。
+
+    日线图数据源：每天收盘后把当日主力净流入落库，前端日级折线图读取。
+    与 collect_concept_daily_snapshot 并存（后者写 concept_daily 供宽表
+    近3/5日用；本函数写 sector_daily 供日线图用，保留 30 交易日）。
+    """
+    global _sector_daily_snapshot_date
+    today = date.today().strftime("%Y%m%d")
+    if _sector_daily_snapshot_date == today:
+        return {"skipped": True, "reason": "already snapshotted today"}
+
+    # 交易日守卫：非交易日不写入
+    if not is_trading_day(date.today()):
+        logger.info("sector_daily_snapshot: %s not a trading day, skipped", today)
+        return {"skipped": True, "reason": "not a trading day"}
+
+    from westock import fund_flow as _ff, extract_main_net_flow as _emnf
+    from westock_fund_metrics import calc_sector_metrics
+
+    # 全板块代码：二级(pt018) + 概念(pt02)，去重合并
+    all_codes = []
+    seen = set()
+    for c in get_sector_codes():
+        if c not in seen:
+            seen.add(c)
+            all_codes.append(c)
+    from concept_sectors import get_default_codes as _gdc
+    for c in _gdc():
+        if c not in seen:
+            seen.add(c)
+            all_codes.append(c)
+
+    if not all_codes:
+        return {"error": "no sector codes"}
+
+    t0 = time.time()
+    flow_records = _ff(all_codes, raw=True)
+    elapsed = time.time() - t0
+    logger.info("sector_daily_snapshot: fund_flow %d codes in %.1fs, got %d",
+                len(all_codes), elapsed, len(flow_records))
+
+    from sectors import get_default_sector_map
+    l2_map = get_default_sector_map()
+    from concept_sectors import get_default_name as _gdn
+
+    records = []
+    for r in flow_records:
+        code = r.get("code") or r.get("SecuCode")
+        if not code:
+            continue
+        net = _emnf(r)
+        metrics = calc_sector_metrics(r, TURNOVER_METHOD) if r else {}
+        name = (r.get("name")
+                or (l2_map.get(code, {}) or {}).get("name")
+                or _gdn(code)
+                or code)
+        records.append({
+            "code": code,
+            "name": name,
+            "trade_date": today,
+            "net_flow": net,
+            "turnover": metrics.get("turnover"),
+        })
+
+    if records:
+        storage = get_storage()
+        n = storage.upsert_sector_daily_batch(records)
+        storage.cleanup_sector_daily(_SECTOR_DAILY_KEEP)
+        _sector_daily_snapshot_date = today
+        logger.info("sector_daily_snapshot: saved %d records for %s", n, today)
+        return {"saved": n, "trade_date": today, "elapsed": round(elapsed, 1)}
+
+    return {"saved": 0, "trade_date": today, "elapsed": round(elapsed, 1)}
+
+
 # ============================================================
 # 日级数据采集（实时拉取，不长期落地）
 # ============================================================
@@ -790,6 +871,13 @@ def run_collector_loop(force: bool = False) -> None:
                         logger.info("concept_daily_snapshot done: %s", result)
                 except Exception as e:
                     logger.warning("concept_daily_snapshot error: %s", e)
+                # 全板块日快照（日线图数据源，pt018+pt02，保留 30 交易日）
+                try:
+                    result = collect_sector_daily_snapshot()
+                    if result and not result.get("skipped"):
+                        logger.info("sector_daily_snapshot done: %s", result)
+                except Exception as e:
+                    logger.warning("sector_daily_snapshot error: %s", e)
             time.sleep(IDLE_SLEEP)
             backoff = 0
             cycle = 0

@@ -19,8 +19,9 @@ import { MinuteChart, DailyHistoryChart, NetRateCompareChart } from "./Charts";
 import SectorDetail from "./SectorDetail";
 import L1Tab from "./L1Tab";
 import CompareChart from "./CompareChart";
+import DailyChart from "./DailyChart";
 import AlertsTab from "./AlertsTab";
-import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect, fetchUserPrefs, saveUserPrefs, fetchConceptSectors, fetchErrors, fetchWatchlist, addWatchlist, removeWatchlist, refreshConcepts } from "./api";
+import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect, fetchUserPrefs, saveUserPrefs, fetchConceptSectors, fetchErrors, fetchWatchlist, addWatchlist, removeWatchlist, refreshConcepts, fetchSectorDailyHistory } from "./api";
 import AuthGuard from "./components/AuthGuard";
 
 const { Header, Content, Footer } = Layout;
@@ -150,6 +151,30 @@ export default function App() {
   const [manualCodes, setManualCodes] = useState("");  // 手动输入板块代码
   const [compareData, setCompareData] = useState(null);
   const [compareLoading, setCompareLoading] = useState(false);
+
+  // 日线图（板块日级净流入）
+  const [dailyCodes, setDailyCodes] = useState("");      // 手动输入板块代码
+  const [dailyDays, setDailyDays] = useState(30);         // 近 N 交易日
+  const [dailyMode, setDailyMode] = useState("net");      // net / turnover
+  const [dailyData, setDailyData] = useState(null);
+  const [dailyLoading, setDailyLoading] = useState(false);
+
+  const loadDailyHistory = useCallback(async () => {
+    const codes = dailyCodes.trim();
+    if (!codes) {
+      message.warning("请输入板块代码（逗号分隔，如 pt01801081,pt02003800）");
+      return;
+    }
+    setDailyLoading(true);
+    try {
+      const data = await fetchSectorDailyHistory(codes, dailyDays);
+      setDailyData(data);
+    } catch (e) {
+      message.error("加载日线图失败: " + (e.response?.data?.detail || e.message));
+    } finally {
+      setDailyLoading(false);
+    }
+  }, [dailyCodes, dailyDays]);
 
   // 高频模式
   const [focusEnabled, setFocusEnabled] = useState(false);
@@ -945,6 +970,49 @@ export default function App() {
               key: "alerts",
               label: `档位告警`,
               children: <AlertsTab />,
+            },
+            {
+              key: "daily",
+              label: "日线图",
+              children: (
+                <Card title="板块日级净流入折线图" style={{ marginBottom: 16 }}>
+                  <Space style={{ marginBottom: 12 }} wrap>
+                    <span>板块代码：</span>
+                    <Input
+                      placeholder="逗号分隔，如 pt01801081,pt02003800"
+                      value={dailyCodes}
+                      onChange={(e) => setDailyCodes(e.target.value)}
+                      style={{ width: 320 }}
+                      allowClear
+                    />
+                    <span>近</span>
+                    <InputNumber
+                      min={1} max={60} value={dailyDays}
+                      onChange={(v) => setDailyDays(Number(v) || 30)}
+                      style={{ width: 70 }}
+                    />
+                    <span>个交易日</span>
+                    <Select
+                      value={dailyMode}
+                      onChange={setDailyMode}
+                      style={{ width: 130 }}
+                      options={[
+                        { value: "net", label: "主力净流入(亿)" },
+                        { value: "turnover", label: "成交额(亿)" },
+                      ]}
+                    />
+                    <Button type="primary" onClick={loadDailyHistory} loading={dailyLoading}>
+                      加载
+                    </Button>
+                  </Space>
+                  <DailyChart
+                    title="板块日级净流入"
+                    mode={dailyMode}
+                    series={dailyData?.series || []}
+                    height={520}
+                  />
+                </Card>
+              ),
             },
           ]}
         />
