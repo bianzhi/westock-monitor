@@ -138,6 +138,26 @@ if [ -f "$DB" ]; then
     _info "sector_meta: $(sqlite3 "$DB" 'SELECT COUNT(*) FROM sector_meta' 2>/dev/null) 行"
     _info "minute_snapshot: $(sqlite3 "$DB" 'SELECT COUNT(*) FROM minute_snapshot' 2>/dev/null) 行 (今天 $(sqlite3 "$DB" "SELECT COUNT(*) FROM minute_snapshot WHERE trade_date='$(date +%Y%m%d)'" 2>/dev/null))"
     _info "concept_daily: $(sqlite3 "$DB" 'SELECT COUNT(*) FROM concept_daily' 2>/dev/null) 行"
+    # 采集活性：交易时段内最新分钟数据距今 >5 分钟 = 数据停采（收盘后停采正常）
+    _GAP_MIN=$($VENV_PY -c "
+import sqlite3, datetime
+c = sqlite3.connect('$DB')
+r = c.execute('SELECT MAX(timestamp) FROM minute_snapshot WHERE trade_date=?', (datetime.date.today().strftime('%Y%m%d'),)).fetchone()[0]
+c.close()
+print(int((datetime.datetime.now() - datetime.datetime.fromisoformat(r)).total_seconds()/60) if r else 99999)
+" 2>/dev/null)
+    _HM=$(( $(date +%H) * 60 + $(date +%M) ))
+    if [ -n "$_GAP_MIN" ] && [ "$_GAP_MIN" != "99999" ]; then
+        if { [ "$_HM" -ge 570 ] && [ "$_HM" -le 690 ]; } || { [ "$_HM" -ge 780 ] && [ "$_HM" -le 900 ]; }; then
+            if [ "$_GAP_MIN" -gt 5 ]; then
+                _fail "采集活性" "交易时段内数据停采：最新数据距今 ${_GAP_MIN} 分钟"
+            else
+                _ok "采集活性正常（距今 ${_GAP_MIN} 分钟）"
+            fi
+        else
+            _info "非交易时段，采集停采正常（最新距今 ${_GAP_MIN} 分钟）"
+        fi
+    fi
 else
     _fail "数据库文件" "$DB 不存在"
 fi
