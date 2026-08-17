@@ -101,9 +101,11 @@ if [ -f "$LOG" ]; then
         _fail "concept flow 线程" "未启动（概念板块宽表将退化为请求时同步拉取）"
     fi
     # 最近业务错误：排除 uvicorn/h11 的"非法请求行"（公网扫描器探测端口，
-    # 非业务 bug，天天有；只关注 app/collector/westock 等业务代码异常）
+    # 非业务 bug，天天有）；也排除进程关闭时的 ThreadPoolExecutor 竞态
+    # （"cannot schedule new futures after interpreter shutdown"，进程重启瞬间
+    #  采集线程还在提交任务的噪音，不影响正常运行期数据更新）
     RECENT_ERR=$(grep -E "ERROR|Traceback|NameError" "$LOG" \
-        | grep -vE "h11|uvicorn.error|Invalid HTTP request" | tail -3)
+        | grep -vE "h11|uvicorn.error|Invalid HTTP request|interpreter shutdown|cannot schedule new futures" | tail -3)
     if [ -n "$RECENT_ERR" ]; then
         _warn "最近业务日志有异常" "$(echo "$RECENT_ERR" | head -1)"
     else
@@ -165,16 +167,26 @@ else
     _warn "westock-data-skillhub 未全局安装" "走 npx 每次解析包，慢且易超时；./dev.sh 会自动安装，或手动 npm install -g westock-data-skillhub@1.0.5"
 fi
 
-# CLI 探活（--help 返回 0 即正常；macOS 无 timeout 命令时跳过超时保护）
-if command -v timeout &>/dev/null; then
-    _CLI_OK=$(timeout 10 npx -y westock-data-skillhub@1.0.5 --help >/dev/null 2>&1 && echo yes || echo no)
+# CLI 探活：用全局 bin（若已安装）+ --version（与 westock.py _ping_cli 一致）。
+# 不能用 --help：westock-data-skillhub 不支持 --help 会返回非 0；
+# 也不能用 npx：已全局安装时 npx 会重新解析包，慢且易超时。
+if [ -n "$_NPM_BIN" ]; then
+    if "$_NPM_BIN/$_WBIN_NAME" --version >/dev/null 2>&1; then
+        _ok "westock CLI 可执行（--version 正常）"
+    else
+        _fail "westock CLI" "--version 调用失败，fund_flow 将不可用"
+    fi
 else
-    _CLI_OK=$(npx -y westock-data-skillhub@1.0.5 --help >/dev/null 2>&1 && echo yes || echo no)
-fi
-if [ "$_CLI_OK" = "yes" ]; then
-    _ok "westock CLI 可执行（--help 正常）"
-else
-    _fail "westock CLI" "--help 调用失败，fund_flow 将不可用"
+    if command -v timeout &>/dev/null; then
+        _CLI_OK=$(timeout 15 npx -y westock-data-skillhub@1.0.5 --version >/dev/null 2>&1 && echo yes || echo no)
+    else
+        _CLI_OK=$(npx -y westock-data-skillhub@1.0.5 --version >/dev/null 2>&1 && echo yes || echo no)
+    fi
+    if [ "$_CLI_OK" = "yes" ]; then
+        _ok "westock CLI 可执行（npx --version 正常）"
+    else
+        _fail "westock CLI" "--version 调用失败，fund_flow 将不可用"
+    fi
 fi
 
 # ----------------------------------------------------------
