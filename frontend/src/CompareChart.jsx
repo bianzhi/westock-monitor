@@ -96,9 +96,12 @@ export default function CompareChart({ series = [], mode = "minute", title = "�
         formatter: (params) => {
           if (!params || !params.length) return "";
           const axisValue = params[0].axisValue; // HH:MM
+          // 按资金额度倒序排序，使 tooltip 顺序与折线高低对应
+          const sorted = [...params]
+            .filter((p) => p.value != null)
+            .sort((a, b) => Number(b.value) - Number(a.value));
           let html = `<b>${axisValue}</b><br/>`;
-          params.forEach((p) => {
-            if (p.value == null) return;
+          sorted.forEach((p) => {
             const v = Number(p.value).toFixed(3);
             const color = COLORS[p.seriesIndex % COLORS.length];
             html += `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:4px;"></span>`;
