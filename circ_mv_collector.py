@@ -214,13 +214,15 @@ def collect_constituents(codes: List[str]) -> Dict[str, List[Dict]]:
 
 
 def collect_constituents_all_sectors() -> Dict[str, List[str]]:
-    """采集全部 134 板块的成分股，返回 {pt_code: [westock_stock_code, ...]}。
+    """采集全部板块（二级 pt01 + 概念 pt02）的成分股。
 
-    分批调用 sector_constituent，避免单次请求过多板块。
+    返回 {pt_code: [westock_stock_code, ...]}，分批调用 sector_constituent。
     """
-    from sectors import get_default_codes
-    all_codes = get_default_codes()
-    logger.info("collect_constituents_all_sectors: %d sectors", len(all_codes))
+    from sectors import get_default_codes as _l2_codes
+    from concept_sectors import get_default_codes as _concept_codes
+    all_codes = list(_l2_codes())
+    all_codes.extend(c for c in _concept_codes() if c not in all_codes)
+    logger.info("collect_constituents_all_sectors: %d sectors (l2 + concept)", len(all_codes))
 
     batch_size = 10  # 实测 10 个板块一次调用稳定
     result: Dict[str, List[str]] = {}
