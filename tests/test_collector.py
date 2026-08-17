@@ -47,6 +47,12 @@ def _mock_fund_flow_today_only(today_net_yi: float = 1.0,
     return _fake
 
 
+class _EmptyStorage:
+    """mock storage：get_sector_daily_batch 返回空，隔离真实落库数据。"""
+    def get_sector_daily_batch(self, codes, days=30):
+        return {c: [] for c in codes}
+
+
 # ============================================================
 # 分段差分估算
 # ============================================================
@@ -150,6 +156,7 @@ class TestEdgeCases:
     def test_fund_flow_empty_returns_today_only(self, monkeypatch):
         """fund_flow 返回空 → 仅今日 1 条（net_flow=None）"""
         monkeypatch.setattr(collector, "fund_flow", lambda codes, raw=True: [])
+        monkeypatch.setattr(collector, "get_storage", lambda: _EmptyStorage())
         records = collector.collect_daily_records("pt01801081", n=5)
         assert len(records) == 1
         assert records[0]["net_flow"] is None
@@ -172,7 +179,7 @@ class TestEdgeCases:
             assert r["net_flow"] == pytest.approx(1e8, rel=1e-6)
 
     def test_missing_5d_no_history(self, monkeypatch):
-        """5D 字段缺失 → 不估算历史，只返回今日"""
+        """5D 字段缺失 → 历史日 None 占位（不估算假值），今日有值"""
         def _fake(codes, raw=True):
             return [{"code": "x", "MainNetFlow": 1e8, "MainNetFlow5D": None,
                      "MainNetFlow10D": None, "MainNetFlow20D": None,
@@ -180,5 +187,9 @@ class TestEdgeCases:
                      "RetailInFlow": 0, "RetailOutFlow": 0,
                      "ClosePrice": "100", "EndDate": "2026-07-31"}]
         monkeypatch.setattr(collector, "fund_flow", _fake)
+        monkeypatch.setattr(collector, "get_storage", lambda: _EmptyStorage())
         records = collector.collect_daily_records("pt01801081", n=5)
-        assert len(records) == 1
+        assert len(records) == 5  # 今日 + 4 个历史日（None 占位）
+        assert records[0]["net_flow"] == pytest.approx(1e8, rel=1e-6)
+        for r in records[1:]:
+            assert r["net_flow"] is None  # 历史日 None 占位，不估算假值

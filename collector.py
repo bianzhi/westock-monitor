@@ -629,7 +629,8 @@ def collect_daily_records(code: str, n: int = 5) -> List[Dict]:
     #    修复：历史日期框架必须独立于 net_5d 存在——MainNetFlow5D 缺失
     #    （接口超时/字段不全）时也应生成近 n 天的日期记录（数据为 None 占位），
     #    否则前端行展开日柱状图只有当天一天。
-    if n > 1:
+    #    但保留 today_net 条件：fund_flow 完全空（连今日数据都没有）时不生成历史日。
+    if n > 1 and today_net is not None:
         # 各段日均净流入（分段阶梯；字段缺失时为 None）
         seg_1_4 = (net_5d - today_net) / 4.0 if (net_5d is not None and today_net is not None) else None  # T-1~T-4
         seg_5_9 = ((net_10d - net_5d) / 5.0) if (net_10d is not None and net_5d is not None) else None    # T-5~T-9
@@ -676,13 +677,13 @@ def collect_daily_records(code: str, n: int = 5) -> List[Dict]:
             elif seg_10_19 is not None and i <= 19:
                 avg = seg_10_19
             else:
-                # 超出 20D 范围，用最后一段兜底，没有则用 seg_1_4
-                avg = seg_10_19 or seg_5_9 or seg_1_4 or 0
+                # 超出 20D 范围，用最后一段兜底；seg 全 None（5D/10D/20D 全缺失）时 None 占位
+                avg = seg_10_19 or seg_5_9 or seg_1_4
 
             records.append({
                 "date": d.isoformat(),
                 "trade_date": td,
-                "net_flow": round(avg, 2),
+                "net_flow": round(avg, 2) if avg is not None else None,
                 "turnover": None,
                 "circ_mv": today_circ_mv,
                 "main_net_flow_5d": net_5d,

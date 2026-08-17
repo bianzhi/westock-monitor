@@ -70,13 +70,17 @@ def calc_strength_value(net_rate_pct: float, scale: str) -> float:
         # [0, mid] -> [0, 1.0]
         return (nr / mid) * 1.0 if mid != 0 else 0.0
     elif nr >= lo:
-        # [lo, 0] -> [-1.0, 0]
-        return (nr / lo) * 1.0 if lo != 0 else 0.0
+        # [lo, 0] -> [-1.0, 0]：lo 为负值，-nr/lo 得负值（原 nr/lo 符号反了）
+        return (-nr / lo) * 1.0 if lo != 0 else 0.0
     else:
-        # [vlo, lo] -> [-2.0, -1.0]
-        if vlo == lo:
+        # nr < lo：分 [vlo, lo]（偏弱）和 < vlo（弱）两段
+        if lo == vlo:
             return -2.0
-        return -1.0 + (nr - lo) / (vlo - lo)
+        if nr >= vlo:
+            # [vlo, lo] -> [-2.0, -1.0]
+            return -2.0 + (nr - vlo) / (lo - vlo)
+        # nr < vlo（弱档）→ 固定 -2.0
+        return -2.0
 
 
 def calc_strength_level(net_rate_pct: float, scale: str) -> str:
