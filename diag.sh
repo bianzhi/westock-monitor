@@ -105,7 +105,9 @@ if [ -f "$LOG" ]; then
     # （"cannot schedule new futures after interpreter shutdown"，进程重启瞬间
     #  采集线程还在提交任务的噪音，不影响正常运行期数据更新）
     RECENT_ERR=$(grep -E "ERROR|Traceback|NameError" "$LOG" \
-        | grep -vE "h11|uvicorn.error|Invalid HTTP request|Traceback \(most recent call last\)|interpreter shutdown|cannot schedule new futures" | tail -3)
+        | grep -vE "h11|uvicorn.error|Invalid HTTP request|Traceback \(most recent call last\)|interpreter shutdown|cannot schedule new futures" \
+        | grep "$(date +%Y-%m-%d)" \
+        | tail -3)
     if [ -n "$RECENT_ERR" ]; then
         _warn "最近业务日志有异常" "$(echo "$RECENT_ERR" | head -1)"
     else
