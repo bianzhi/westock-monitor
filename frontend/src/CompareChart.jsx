@@ -10,6 +10,24 @@ const COLORS = [
 ];
 
 /**
+ * 判断时间戳是否在 A 股交易时段内（9:30-11:30 / 13:00-15:00）。
+ * 非交易时段（盘前/午休/盘后）的点不绘制折线。
+ */
+function isTradingTime(ts) {
+  if (!ts) return false;
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return false;
+  const h = d.getHours();
+  const m = d.getMinutes();
+  const t = h * 60 + m;
+  // 上午 9:30-11:30
+  if (t >= 570 && t <= 690) return true;
+  // 下午 13:00-15:00
+  if (t >= 780 && t <= 900) return true;
+  return false;
+}
+
+/**
  * 多板块分时对比图
  * props:
  *   series = [{ code, name, rank, points: [{time, timestamp, minute_delta, main_net_flow, is_open_anchor}, ...] }, ...]
@@ -27,6 +45,9 @@ export default function CompareChart({ series = [], mode = "minute", title = "�
     }
 
     const isCumulative = mode === "cumulative";
+    // 全部有效点的首末时间戳（用于 x 轴范围，避免画出非交易时段）
+    let minTs = Infinity;
+    let maxTs = -Infinity;
 
     return {
       title: {
@@ -64,6 +85,8 @@ export default function CompareChart({ series = [], mode = "minute", title = "�
       xAxis: {
         type: "time",
         minInterval: 60000,
+        // 范围限制在有效数据（交易时段）内，避免画出盘前/盘后空区
+        ...(minTs !== Infinity && maxTs !== -Infinity ? { min: minTs, max: maxTs } : {}),
         axisLabel: {
           rotate: 45,
           fontSize: 10,
@@ -80,9 +103,16 @@ export default function CompareChart({ series = [], mode = "minute", title = "�
         splitLine: { lineStyle: { type: "dashed", color: "#e0e0e0" } },
       },
       series: series.map((s, idx) => {
+        // 有效点 = 交易时段内的数据点（过滤盘前/午休/盘后），用于符号显示与 x 轴范围
         const validPoints = (s.points || []).filter((p) => {
+          if (!isTradingTime(p.timestamp)) return false;
           if (isCumulative) return p.main_net_flow != null;
           return !p.is_open_anchor && p.minute_delta != null;
+        });
+        validPoints.forEach((p) => {
+          const ts = new Date(p.timestamp).getTime();
+          if (ts < minTs) minTs = ts;
+          if (ts > maxTs) maxTs = ts;
         });
         // 数据点 ≤5 时显示圆点标记，否则隐藏（点太多会遮盖折线）
         const showSymbol = validPoints.length <= 5;
@@ -96,6 +126,8 @@ export default function CompareChart({ series = [], mode = "minute", title = "�
         itemStyle: { color: COLORS[idx % COLORS.length] },
         connectNulls: isCumulative,  // 累计模式连接 null 点，画连续折线
         data: (s.points || []).map((p) => {
+          // 非交易时段的点不绘制（午休/盘前/盘后折线断开）
+          if (!isTradingTime(p.timestamp)) return null;
           if (isCumulative) {
             // 累计模式：使用 main_net_flow，跳过空值
             if (p.main_net_flow == null) return null;
