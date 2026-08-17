@@ -625,9 +625,13 @@ def collect_daily_records(code: str, n: int = 5) -> List[Dict]:
     #    fund flow 的 MainNetFlow/5D/10D/20D 实测仍是"含最近交易日"的累计值
     #    （westock CLI 在非交易日返回的是上一个交易日收盘值），
     #    因此历史估算仍应锚定"上一个交易日为 T-1"，而非把 today 当 T-0。
-    if n > 1 and net_5d is not None and today_net is not None:
-        # 各段日均净流入（分段阶梯）
-        seg_1_4 = (net_5d - today_net) / 4.0 if net_5d is not None and today_net is not None else None  # T-1~T-4
+    #
+    #    修复：历史日期框架必须独立于 net_5d 存在——MainNetFlow5D 缺失
+    #    （接口超时/字段不全）时也应生成近 n 天的日期记录（数据为 None 占位），
+    #    否则前端行展开日柱状图只有当天一天。
+    if n > 1:
+        # 各段日均净流入（分段阶梯；字段缺失时为 None）
+        seg_1_4 = (net_5d - today_net) / 4.0 if (net_5d is not None and today_net is not None) else None  # T-1~T-4
         seg_5_9 = ((net_10d - net_5d) / 5.0) if (net_10d is not None and net_5d is not None) else None    # T-5~T-9
         seg_10_19 = ((net_20d - net_10d) / 10.0) if (net_20d is not None and net_10d is not None) else None  # T-10~T-19
 
