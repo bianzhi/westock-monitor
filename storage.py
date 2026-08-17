@@ -106,7 +106,9 @@ class Storage:
                     skip_count      INTEGER,            -- 跳过数
                     fail_rate       REAL,               -- 失败率
                     is_estimated    INTEGER,            -- 0/1 是否估算值
-                    source          TEXT,               -- 数据来源 tushare/westock_reverse/mixed/unknown
+                    source          TEXT,               -- 数据来源 tushare/westock_reverse/tencent/mixed/unknown
+                    change_pct      REAL,               -- 板块涨跌幅(%)，按流通市值加权
+                    turnover_rate   REAL,               -- 板块换手率(%)，按流通市值加权
                     updated_at      TEXT,
                     PRIMARY KEY (code, trade_date)
                 )
@@ -115,11 +117,12 @@ class Storage:
                 CREATE INDEX IF NOT EXISTS idx_circ_mv_date
                 ON sector_circ_mv(trade_date)
             """)
-            # 旧表无 source 列时补列（兼容升级）
-            try:
-                cur.execute("ALTER TABLE sector_circ_mv ADD COLUMN source TEXT")
-            except sqlite3.OperationalError:
-                pass  # 列已存在
+            # 旧表无 source/change_pct/turnover_rate 列时补列（兼容升级）
+            for _col, _type in (("source", "TEXT"), ("change_pct", "REAL"), ("turnover_rate", "REAL")):
+                try:
+                    cur.execute(f"ALTER TABLE sector_circ_mv ADD COLUMN {_col} {_type}")
+                except sqlite3.OperationalError:
+                    pass  # 列已存在
 
             # 分钟快照表（差分前的当日累计值）
             cur.execute("""
@@ -545,8 +548,9 @@ class Storage:
                         INSERT INTO sector_circ_mv
                             (code, trade_date, circ_mv, circ_mv_yi,
                              stock_count, valid_count, skip_count,
-                             fail_rate, is_estimated, source, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             fail_rate, is_estimated, source,
+                             change_pct, turnover_rate, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(code, trade_date) DO UPDATE SET
                             circ_mv = excluded.circ_mv,
                             circ_mv_yi = excluded.circ_mv_yi,
@@ -556,6 +560,8 @@ class Storage:
                             fail_rate = excluded.fail_rate,
                             is_estimated = excluded.is_estimated,
                             source = excluded.source,
+                            change_pct = excluded.change_pct,
+                            turnover_rate = excluded.turnover_rate,
                             updated_at = excluded.updated_at
                     """, (
                         code, trade_date,
@@ -564,6 +570,7 @@ class Storage:
                         r.get("skip_count"), r.get("fail_rate"),
                         1 if r.get("is_estimated") else 0,
                         r.get("source") or "unknown",
+                        r.get("change_pct"), r.get("turnover_rate"),
                         now_iso,
                     ))
                     count += 1

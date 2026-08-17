@@ -27,6 +27,13 @@ function isTradingTime(ts) {
   return false;
 }
 
+/** 分钟数 → HH:MM 字符串 */
+function fmtTime(minutes) {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
 /**
  * 多板块分时对比图
  * props:
@@ -34,6 +41,9 @@ function isTradingTime(ts) {
  *   mode = "minute" | "cumulative"  — 每分钟净流入 / 当日累计净流入
  *   title = 标题
  *   height = 图表高度
+ *
+ * 上午/下午衔接：X 轴用 category（统一交易时间点列表），不含午休 11:30-13:00
+ * 的时间点，因此 11:30 最后一个点直接连到 13:00 第一个点，无午休空档。
  */
 export default function CompareChart({ series = [], mode = "minute", title = "板块分时对比", height = 480 }) {
   const option = useMemo(() => {
@@ -45,9 +55,35 @@ export default function CompareChart({ series = [], mode = "minute", title = "�
     }
 
     const isCumulative = mode === "cumulative";
-    // 全部有效点的首末时间戳（用于 x 轴范围，避免画出非交易时段）
-    let minTs = Infinity;
-    let maxTs = -Infinity;
+
+    // 1. 收集所有板块交易时段内的分钟点（去重排序），作为 category 轴 data
+    const timeSet = new Set();
+    series.forEach((s) => {
+      (s.points || []).forEach((p) => {
+        if (!isTradingTime(p.timestamp)) return;
+        const d = new Date(p.timestamp);
+        timeSet.add(d.getHours() * 60 + d.getMinutes());
+      });
+    });
+    const times = Array.from(timeSet).sort((a, b) => a - b);
+    const timeLabels = times.map(fmtTime);
+
+    // 2. 每个 series 的 data 按 times 对齐（缺失填 null）
+    const seriesData = series.map((s) => {
+      const valueMap = new Map();
+      (s.points || []).forEach((p) => {
+        if (!isTradingTime(p.timestamp)) return;
+        const d = new Date(p.timestamp);
+        const t = d.getHours() * 60 + d.getMinutes();
+        if (isCumulative) {
+          if (p.main_net_flow != null) valueMap.set(t, Number(p.main_net_flow) / 1e8);
+        } else {
+          // 分钟模式：跳过开盘锚点（is_open_anchor）和空值
+          if (!p.is_open_anchor && p.minute_delta != null) valueMap.set(t, Number(p.minute_delta) / 1e8);
+        }
+      });
+      return times.map((t) => (valueMap.has(t) ? valueMap.get(t) : null));
+    });
 
     return {
       title: {
@@ -59,13 +95,11 @@ export default function CompareChart({ series = [], mode = "minute", title = "�
         trigger: "axis",
         formatter: (params) => {
           if (!params || !params.length) return "";
-          const ts = params[0].axisValue;
-          const d = new Date(ts);
-          const time = d.toTimeString().slice(0, 8);
-          let html = `<b>${time}</b><br/>`;
+          const axisValue = params[0].axisValue; // HH:MM
+          let html = `<b>${axisValue}</b><br/>`;
           params.forEach((p) => {
-            if (p.value == null || p.value[1] == null) return;
-            const v = Number(p.value[1]).toFixed(3);
+            if (p.value == null) return;
+            const v = Number(p.value).toFixed(3);
             const color = COLORS[p.seriesIndex % COLORS.length];
             html += `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:4px;"></span>`;
             html += `${p.seriesName}: ${v} 亿<br/>`;
@@ -83,18 +117,9 @@ export default function CompareChart({ series = [], mode = "minute", title = "�
       },
       grid: { left: 50, right: 30, top: 80, bottom: 40 },
       xAxis: {
-        type: "time",
-        minInterval: 60000,
-        // 范围限制在有效数据（交易时段）内，避免画出盘前/盘后空区
-        ...(minTs !== Infinity && maxTs !== -Infinity ? { min: minTs, max: maxTs } : {}),
-        axisLabel: {
-          rotate: 45,
-          fontSize: 10,
-          formatter: (value) => {
-            const d = new Date(value);
-            return d.toTimeString().slice(0, 5);
-          },
-        },
+        type: "category",
+        data: timeLabels,
+        axisLabel: { rotate: 45, fontSize: 10 },
         splitLine: { show: false },
       },
       yAxis: {
@@ -103,44 +128,22 @@ export default function CompareChart({ series = [], mode = "minute", title = "�
         splitLine: { lineStyle: { type: "dashed", color: "#e0e0e0" } },
       },
       series: series.map((s, idx) => {
-        // 有效点 = 交易时段内的数据点（过滤盘前/午休/盘后），用于符号显示与 x 轴范围
-        const validPoints = (s.points || []).filter((p) => {
-          if (!isTradingTime(p.timestamp)) return false;
-          if (isCumulative) return p.main_net_flow != null;
-          return !p.is_open_anchor && p.minute_delta != null;
-        });
-        validPoints.forEach((p) => {
-          const ts = new Date(p.timestamp).getTime();
-          if (ts < minTs) minTs = ts;
-          if (ts > maxTs) maxTs = ts;
-        });
+        const data = seriesData[idx];
         // 数据点 ≤5 时显示圆点标记，否则隐藏（点太多会遮盖折线）
-        const showSymbol = validPoints.length <= 5;
+        const validCount = data.filter((v) => v != null).length;
+        const showSymbol = validCount <= 5;
         return {
-        name: s.name,
-        type: "line",
-        smooth: false,
-        symbol: showSymbol ? "circle" : "none",
-        symbolSize: showSymbol ? 5 : 0,
-        lineStyle: { width: 2, color: COLORS[idx % COLORS.length] },
-        itemStyle: { color: COLORS[idx % COLORS.length] },
-        connectNulls: isCumulative,  // 累计模式连接 null 点，画连续折线
-        data: (s.points || []).map((p) => {
-          // 非交易时段的点不绘制（午休/盘前/盘后折线断开）
-          if (!isTradingTime(p.timestamp)) return null;
-          if (isCumulative) {
-            // 累计模式：使用 main_net_flow，跳过空值
-            if (p.main_net_flow == null) return null;
-            const ts = new Date(p.timestamp).getTime();
-            return [ts, Number(p.main_net_flow) / 1e8];
-          }
-          // 分钟模式：跳过开盘锚点和空值
-          if (p.is_open_anchor || p.minute_delta == null) return null;
-          const ts = new Date(p.timestamp).getTime();
-          return [ts, Number(p.minute_delta) / 1e8];
-        }),
-      }
-    }),
+          name: s.name,
+          type: "line",
+          smooth: false,
+          symbol: showSymbol ? "circle" : "none",
+          symbolSize: showSymbol ? 5 : 0,
+          lineStyle: { width: 2, color: COLORS[idx % COLORS.length] },
+          itemStyle: { color: COLORS[idx % COLORS.length] },
+          connectNulls: isCumulative, // 累计模式连接 null 点，画连续折线
+          data,
+        };
+      }),
     };
   }, [series, mode, title]);
 

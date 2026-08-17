@@ -410,6 +410,72 @@ def _empty_result(today_str: str) -> Dict:
     }
 
 
+def collect_all_sectors_circ_mv_tencent(stock_map=None) -> Dict[str, Dict]:
+    """方案 C：成分股 + 腾讯 qt.gtimg.cn 个股流通市值累加（免费无需 token）。
+
+    比 Tushare 方案 A 更可靠（腾讯接口就是自选股 App 自己用的数据源），
+    同时得到板块涨跌幅/换手率（按流通市值加权）。
+
+    Args:
+        stock_map: 可选 {pt_code: [{code, ...}]}，不传则自动采集成分股
+
+    Returns:
+        {pt_code: {circ_mv, circ_mv_yi, change_pct, turnover_rate,
+                   stock_count, valid_count, skip_count, fail_rate,
+                   is_estimated, source="tencent", trade_date}}
+    """
+    from tencent_quote import fetch_stock_quotes, aggregate_sector_metrics
+
+    if stock_map is None:
+        stock_map = collect_constituents_all_sectors()
+    if not stock_map:
+        logger.warning("collect_all_sectors_circ_mv_tencent: no stock_map, abort")
+        return {}
+
+    today_str = date.today().strftime("%Y%m%d")
+    all_pt_codes = list(stock_map.keys())
+
+    # 扁平化所有成分股，去重
+    all_stocks = set()
+    for stocks in stock_map.values():
+        for s in stocks:
+            wcode = s.get("code") if isinstance(s, dict) else s
+            if wcode:
+                all_stocks.add(wcode)
+    logger.info("collect_all_sectors_circ_mv_tencent: %d unique stocks across %d sectors",
+                len(all_stocks), len(stock_map))
+
+    # 批量腾讯行情（免费无需 token）
+    quotes = fetch_stock_quotes(sorted(all_stocks))
+
+    result: Dict[str, Dict] = {}
+    for pt_code in all_pt_codes:
+        stock_codes = stock_map.get(pt_code, [])
+        if not stock_codes:
+            result[pt_code] = _empty_result(today_str)
+            continue
+        wcodes = [s.get("code") if isinstance(s, dict) else s for s in stock_codes]
+        agg = aggregate_sector_metrics(quotes, wcodes)
+        result[pt_code] = {
+            "circ_mv": agg["circ_mv"],
+            "circ_mv_yi": agg["circ_mv_yi"],
+            "change_pct": agg["change_pct"],
+            "turnover_rate": agg["turnover_rate"],
+            "stock_count": agg["stock_count"],
+            "valid_count": agg["valid_count"],
+            "skip_count": agg["stock_count"] - agg["valid_count"],
+            "fail_rate": agg["fail_rate"],
+            "is_estimated": agg["fail_rate"] > 0.5,
+            "source": "tencent",
+            "trade_date": today_str,
+        }
+
+    valid = sum(1 for v in result.values() if v["circ_mv"] is not None)
+    logger.info("collect_all_sectors_circ_mv_tencent: done, %d/%d sectors valid",
+                valid, len(result))
+    return result
+
+
 # ============================================================
 # 方案 B 兜底：westock fund flow 反推
 # ============================================================

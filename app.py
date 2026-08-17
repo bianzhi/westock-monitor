@@ -178,6 +178,11 @@ class SectorRow(BaseModel):
     today_net_flow_yi: Optional[float] = None  # 今日净流入(亿)
     today_turnover_yi: Optional[float] = None  # 今日成交额(亿)
     today_net_rate: Optional[float] = None     # 今日净额率(%)
+    change_pct: Optional[float] = None          # 板块涨跌幅(%)，按流通市值加权
+    turnover_rate: Optional[float] = None       # 板块换手率(%)，按流通市值加权
+    fund_strength: Optional[float] = None       # 资金强度 = 净流入/流通市值(%)
+    consecutive_inflow_days: int = 0            # 连续净流入天数
+    divergence: bool = False                    # 背离：净流入>0 但涨跌幅<0
     history: List[Dict[str, Any]] = []          # 近n日明细
     summary_3d: Optional[Dict[str, Any]] = None  # 近3日汇总
     summary_5d: Optional[Dict[str, Any]] = None  # 近5日汇总
@@ -451,6 +456,8 @@ async def get_sectors(
     daily_map = get_daily_map()
     circ_mv_map = get_circ_mv_map()
     meta_map = {m["code"]: m for m in storage.get_all_sector_meta()}
+    # 批量读流通市值缓存（含 change_pct/turnover_rate，方案 C 腾讯落库）
+    circ_mv_detail = storage.get_latest_sector_circ_mv()
 
     if not codes or not sector_list:
         raise HTTPException(status_code=500, detail="no cached sector data")
@@ -487,6 +494,26 @@ async def get_sectors(
         # 强度判定
         strength = _calc_strength_from_records(records, circ_mv_yi, actual_n)
 
+        # 涨跌幅/换手率（方案 C 腾讯落库）
+        circ_detail = circ_mv_detail.get(code, {})
+        change_pct = circ_detail.get("change_pct")
+        turnover_rate = circ_detail.get("turnover_rate")
+        # 资金强度 = 净流入 / 流通市值 (%)
+        fund_strength = None
+        if today_net is not None and circ_mv_yi and circ_mv_yi > 0:
+            fund_strength = round(today_net / (circ_mv_yi * 1e8) * 100, 4)
+        # 连续净流入天数（从最新往前数连续 net_flow > 0）
+        consecutive_days = 0
+        for _r in records:
+            _nf = _r.get("net_flow")
+            if _nf is not None and _nf > 0:
+                consecutive_days += 1
+            else:
+                break
+        # 背离：净流入 > 0 但涨跌幅 < 0（警惕出货）
+        divergence = (today_net is not None and today_net > 0
+                      and change_pct is not None and change_pct < 0)
+
         rows.append(SectorRow(
             code=code,
             name=sec.get("name") or meta.get("name", ""),
@@ -496,6 +523,11 @@ async def get_sectors(
             today_net_flow_yi=_to_yi(today_net),
             today_turnover_yi=_to_yi(today_turnover),
             today_net_rate=_net_rate(today_net, today_turnover),
+            change_pct=change_pct,
+            turnover_rate=turnover_rate,
+            fund_strength=fund_strength,
+            consecutive_inflow_days=consecutive_days,
+            divergence=divergence,
             history=history,
             summary_3d=summary_3d,
             summary_5d=summary_5d,
@@ -673,6 +705,8 @@ async def get_concept_sectors(
 
         rows = []
         today_str = date.today().isoformat()
+        # 批量读流通市值缓存（含 change_pct/turnover_rate，方案 C 腾讯落库）
+        circ_mv_detail = storage.get_latest_sector_circ_mv()
         for code in codes:
             flow = flow_map.get(code, {})
             metrics = calc_sector_metrics(flow, TURNOVER_METHOD) if flow else {}
@@ -716,12 +750,39 @@ async def get_concept_sectors(
             strength_records = (cached_daily[:n] if cached_daily else [today_rec])
             strength = _calc_strength_from_records(strength_records, None, n)
 
+            # 概念板块流通市值/涨跌/换手（方案 C 腾讯落库）
+            circ_detail = circ_mv_detail.get(code, {})
+            c_mv_yi = circ_detail.get("circ_mv_yi")
+            c_change_pct = circ_detail.get("change_pct")
+            c_turnover = circ_detail.get("turnover_rate")
+            c_scale = get_scale(c_mv_yi) if c_mv_yi else "小盘"
+            # 资金强度 = 净流入 / 流通市值 (%)
+            c_fund_strength = None
+            if today_net is not None and c_mv_yi and c_mv_yi > 0:
+                c_fund_strength = round(today_net / (c_mv_yi * 1e8) * 100, 4)
+            # 连续净流入天数
+            c_consecutive = 0
+            for _r in (cached_daily or [today_rec]):
+                _nf = _r.get("net_flow")
+                if _nf is not None and _nf > 0:
+                    c_consecutive += 1
+                else:
+                    break
+            # 背离：净流入 > 0 但涨跌幅 < 0
+            c_divergence = (today_net is not None and today_net > 0
+                            and c_change_pct is not None and c_change_pct < 0)
+
             rows.append(SectorRow(
                 code=code, name=flow.get("name") or get_default_name(code),
-                l1="概念", circ_mv_yi=None, scale="小盘",
+                l1="概念", circ_mv_yi=c_mv_yi, scale=c_scale,
                 today_net_flow_yi=_to_yi(today_net),
                 today_turnover_yi=_to_yi(today_turnover),
                 today_net_rate=_net_rate(today_net, today_turnover),
+                change_pct=c_change_pct,
+                turnover_rate=c_turnover,
+                fund_strength=c_fund_strength,
+                consecutive_inflow_days=c_consecutive,
+                divergence=c_divergence,
                 history=[], summary_3d=summary_3d, summary_5d=summary_5d,
                 strength_value=strength["value"], strength_level=strength["level"],
                 estimated=cached_empty_fallback,

@@ -481,6 +481,79 @@ def collect_sector_daily_snapshot() -> Dict[str, Any]:
     return {"saved": 0, "trade_date": today, "elapsed": round(elapsed, 1)}
 
 
+def verify_daily_against_api(threshold: float = 0.2) -> Dict[str, Any]:
+    """用落库的日级数据校验 westock 接口的 5D/10D 累计字段。
+
+    读 sector_daily 落库的近 5 日/10 日净流入累加，与接口返回的
+    MainNetFlow5D/10D 对比，偏差 > threshold（默认 20%）记为异常。
+
+    用途：发现接口累计字段与每日落库累加不一致的情况（数据质量校验）。
+    落库数据来自 collect_sector_daily_snapshot（westock 原始数据每日落库）。
+
+    Args:
+        threshold: 偏差阈值（相对偏差，默认 0.2 = 20%）
+
+    Returns:
+        {"checked": N, "mismatch_count": M,
+         "mismatches": [{code, name, db_5d, api_5d, dev_5d, db_10d, api_10d, dev_10d}]}
+    """
+    codes = get_sector_codes()
+    if not codes:
+        return {"checked": 0, "mismatches": [], "mismatch_count": 0}
+
+    storage = get_storage()
+    # 读落库数据（近 10 交易日，含当日若已落库）
+    daily_map = storage.get_sector_daily_batch(codes, days=10)
+    # 调接口拿 5D/10D 累计字段
+    flow_records = fund_flow(codes, raw=True)
+    flow_map = {r.get("code") or r.get("SecuCode"): r for r in flow_records}
+
+    from sectors import get_default_sector_map
+    l2_map = get_default_sector_map()
+
+    mismatches = []
+    checked = 0
+    for code in codes:
+        records = daily_map.get(code, [])
+        if len(records) < 5:
+            continue
+        checked += 1
+
+        # 落库累加近 5 日净流入
+        sum_5d_db = sum(r.get("net_flow") or 0 for r in records[:5])
+        api_5d = _safe_float(flow_map.get(code, {}).get("MainNetFlow5D"))
+        dev_5d = abs(sum_5d_db - api_5d) / abs(api_5d) if api_5d else None
+
+        # 落库累加近 10 日：需 ≥10 条落库数据才准确，否则跳过 10 日校验
+        # （避免落库仅 5-9 条时 sum_10d_db 偏小、误报 10 日偏差）
+        sum_10d_db = None
+        dev_10d = None
+        api_10d = _safe_float(flow_map.get(code, {}).get("MainNetFlow10D"))
+        if len(records) >= 10:
+            sum_10d_db = sum(r.get("net_flow") or 0 for r in records[:10])
+            if api_10d:
+                dev_10d = abs(sum_10d_db - api_10d) / abs(api_10d)
+
+        if (dev_5d is not None and dev_5d > threshold) or \
+           (dev_10d is not None and dev_10d > threshold):
+            name = (l2_map.get(code, {}) or {}).get("name") or code
+            mismatches.append({
+                "code": code,
+                "name": name,
+                "db_5d": round(sum_5d_db, 2),
+                "api_5d": api_5d,
+                "dev_5d": round(dev_5d, 4) if dev_5d is not None else None,
+                "db_10d": round(sum_10d_db, 2) if sum_10d_db is not None else None,
+                "api_10d": api_10d,
+                "dev_10d": round(dev_10d, 4) if dev_10d is not None else None,
+            })
+
+    logger.info("verify_daily_against_api: checked=%d, mismatch=%d",
+                checked, len(mismatches))
+    return {"checked": checked, "mismatches": mismatches,
+            "mismatch_count": len(mismatches)}
+
+
 # ============================================================
 # 日级数据采集（实时拉取，不长期落地）
 # ============================================================
@@ -537,7 +610,16 @@ def collect_daily_records(code: str, n: int = 5) -> List[Dict]:
         "main_net_flow_20d": net_20d,
     })
 
-    # 2. 历史 T-1..T-(n-1)：分段差分估算
+    # 读 sector_daily 落库真实数据（每日收盘后落库），用于替代分段估算
+    db_map: Dict[str, Dict] = {}
+    if n > 1:
+        try:
+            db_records = get_storage().get_sector_daily_batch([code], days=n).get(code, [])
+            db_map = {d["trade_date"]: d for d in db_records if d.get("net_flow") is not None}
+        except Exception as e:
+            logger.warning("collect_daily_records %s read sector_daily failed: %s", code, e)
+
+    # 2. 历史 T-1..T-(n-1)：优先读落库真实数据，缺失才分段差分估算
     #    使用交易日历获取真实历史日期。
     #    边界处理：today 非交易日时（周末/节假日盘中查询），
     #    fund flow 的 MainNetFlow/5D/10D/20D 实测仍是"含最近交易日"的累计值
@@ -564,8 +646,25 @@ def collect_daily_records(code: str, n: int = 5) -> List[Dict]:
 
         for idx, d in enumerate(history_days):
             i = idx + 1  # i=1 表示 T-1, i=2 表示 T-2...
+            td = d.strftime("%Y%m%d")
 
-            # 分区选择日均
+            # 优先用 sector_daily 落库真实数据（estimated=False）
+            db_rec = db_map.get(td)
+            if db_rec is not None:
+                records.append({
+                    "date": d.isoformat(),
+                    "trade_date": td,
+                    "net_flow": db_rec.get("net_flow"),
+                    "turnover": db_rec.get("turnover"),
+                    "circ_mv": today_circ_mv,
+                    "main_net_flow_5d": net_5d,
+                    "main_net_flow_10d": net_10d,
+                    "main_net_flow_20d": net_20d,
+                    "estimated": False,
+                })
+                continue
+
+            # 缺失落库数据：分区选择日均（分段差分估算）
             if seg_1_4 is not None and i <= 4:
                 avg = seg_1_4
             elif seg_5_9 is not None and i <= 9:
@@ -578,7 +677,7 @@ def collect_daily_records(code: str, n: int = 5) -> List[Dict]:
 
             records.append({
                 "date": d.isoformat(),
-                "trade_date": d.strftime("%Y%m%d"),
+                "trade_date": td,
                 "net_flow": round(avg, 2),
                 "turnover": None,
                 "circ_mv": today_circ_mv,
@@ -636,6 +735,22 @@ def collect_all_sectors_daily(n: int = 5, asof_date: Optional[str] = None) -> Tu
     trading_days = get_last_n_trading_days(n, anchor_td) if n > 1 else []
     history_days_all = trading_days[1:n] if len(trading_days) > 1 else []
 
+    # 批量读 sector_daily 真实落库数据（每日收盘后 collect_sector_daily_snapshot 写入），
+    # 用于替代 5D/10D 分段估算，保证历史日与接口累计字段可交叉校验。
+    db_daily_map: Dict[str, Dict[str, Dict]] = {}
+    if n > 1:
+        try:
+            raw_db = get_storage().get_sector_daily_batch(codes, days=n)
+            db_daily_map = {
+                code: {d["trade_date"]: d for d in recs if d.get("net_flow") is not None}
+                for code, recs in raw_db.items()
+            }
+            if db_daily_map:
+                logger.info("collect_all_sectors_daily: loaded %d sectors daily from db",
+                            len(db_daily_map))
+        except Exception as e:
+            logger.warning("collect_all_sectors_daily read sector_daily failed: %s", e)
+
     for code in codes:
         flow = flow_map.get(code, {})
         metrics = metrics_map.get(code, {})
@@ -667,6 +782,25 @@ def collect_all_sectors_daily(n: int = 5, asof_date: Optional[str] = None) -> Tu
 
             for idx, d in enumerate(history_days_all):
                 i = idx + 1
+                td = d.strftime("%Y%m%d")
+
+                # 优先用 sector_daily 落库真实数据（estimated=False）
+                db_rec = db_daily_map.get(code, {}).get(td)
+                if db_rec is not None:
+                    records.append({
+                        "date": d.isoformat(),
+                        "trade_date": td,
+                        "net_flow": db_rec.get("net_flow"),
+                        "turnover": db_rec.get("turnover"),
+                        "circ_mv": today_circ_mv,
+                        "main_net_flow_5d": net_5d,
+                        "main_net_flow_10d": net_10d,
+                        "main_net_flow_20d": net_20d,
+                        "estimated": False,
+                    })
+                    continue
+
+                # 缺失落库数据：分段差分估算（estimated=True）
                 if seg_1_4 is not None and i <= 4:
                     avg = seg_1_4
                 elif seg_5_9 is not None and i <= 9:
@@ -678,7 +812,7 @@ def collect_all_sectors_daily(n: int = 5, asof_date: Optional[str] = None) -> Tu
 
                 records.append({
                     "date": d.isoformat(),
-                    "trade_date": d.strftime("%Y%m%d"),
+                    "trade_date": td,
                     "net_flow": round(avg, 2),
                     "turnover": None,
                     "circ_mv": today_circ_mv,
@@ -964,25 +1098,48 @@ def run_minute_loop(force: bool = False) -> None:
 # 流通市值日级采集
 # ============================================================
 def collect_circ_mv_snapshot() -> Dict[str, Any]:
-    """采集一次全板块流通市值快照（成分股反推累加），写入 sector_circ_mv 缓存。
+    """采集一次全板块流通市值快照，写入 sector_circ_mv 缓存。
+
+    优先方案 C（腾讯 qt.gtimg.cn，免费无需 token），失败 fallback 方案 A/B。
 
     Returns:
-        {"timestamp": "...", "total": N, "valid": N, "written": N}
+        {"timestamp": "...", "total": N, "valid": N, "written": N, "source": str}
     """
-    from circ_mv_collector import collect_all_sectors_circ_mv, _get_tushare_pro
+    from circ_mv_collector import (
+        collect_all_sectors_circ_mv,
+        collect_all_sectors_circ_mv_tencent,
+    )
     storage = get_storage()
 
     ts = datetime.now()
-    # 启动日志显示数据源方案（Tushare 直取 / westock 反推兜底）
-    has_tushare = _get_tushare_pro() is not None
-    logger.info("collect_circ_mv_snapshot: start at %s, source=%s",
-                ts.isoformat(), "tushare" if has_tushare else "westock_reverse")
+    result_map = None
+    source = "unknown"
 
+    # 优先方案 C：腾讯 qt.gtimg.cn（免费无需 token，自选股 App 同源）
     try:
-        result_map = collect_all_sectors_circ_mv()
+        result_map = collect_all_sectors_circ_mv_tencent()
+        # 检查是否有有效流通市值：腾讯接口挂时会返回非空 dict 但每个板块
+        # circ_mv=None（空结果），此时不能算成功，应 fallback 到方案 A/B
+        if result_map and any(v.get("circ_mv") is not None for v in result_map.values()):
+            source = "tencent"
+            logger.info("collect_circ_mv_snapshot: start at %s, source=tencent (plan C)",
+                        ts.isoformat())
+        else:
+            result_map = None
+            logger.warning("collect_circ_mv_snapshot: tencent plan C got no valid circ_mv, fallback to A/B")
     except Exception as e:
-        logger.error("collect_circ_mv_snapshot: collect failed: %s", e, exc_info=True)
-        return {"timestamp": ts.isoformat(), "total": 0, "valid": 0, "written": 0, "error": str(e)}
+        logger.warning("collect_circ_mv_snapshot: tencent plan C failed: %s, fallback to A/B", e)
+        result_map = None
+
+    # fallback 方案 A/B（Tushare 直取 / westock 反推）
+    if not result_map:
+        try:
+            result_map = collect_all_sectors_circ_mv()
+            source = "tushare_or_reverse"
+        except Exception as e:
+            logger.error("collect_circ_mv_snapshot: collect failed: %s", e, exc_info=True)
+            return {"timestamp": ts.isoformat(), "total": 0, "valid": 0,
+                    "written": 0, "error": str(e)}
 
     # 写入缓存表
     records = []
@@ -993,14 +1150,15 @@ def collect_circ_mv_snapshot() -> Dict[str, Any]:
 
     valid = sum(1 for v in result_map.values() if v.get("circ_mv") is not None)
     logger.info(
-        "collect_circ_mv_snapshot: done, total=%d, valid=%d, written=%d",
-        len(result_map), valid, n_written,
+        "collect_circ_mv_snapshot: done, total=%d, valid=%d, written=%d, source=%s",
+        len(result_map), valid, n_written, source,
     )
     return {
         "timestamp": ts.isoformat(),
         "total": len(result_map),
         "valid": valid,
         "written": n_written,
+        "source": source,
     }
 
 

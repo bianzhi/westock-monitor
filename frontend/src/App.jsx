@@ -474,6 +474,26 @@ export default function App() {
       render: (s) => <ScaleTag scale={s} />,
     },
     {
+      title: "涨跌幅",
+      dataIndex: "change_pct",
+      key: "change_pct",
+      width: 90,
+      sorter: (a, b) => (a.change_pct ?? -999) - (b.change_pct ?? -999),
+      render: (v) => v != null ? (
+        <span style={{ color: v > 0 ? "#e74c3c" : v < 0 ? "#2ecc71" : "#95a5a6", fontWeight: 600 }}>
+          {v > 0 ? "+" : ""}{v.toFixed(2)}%
+        </span>
+      ) : "-",
+    },
+    {
+      title: "换手率",
+      dataIndex: "turnover_rate",
+      key: "turnover_rate",
+      width: 90,
+      sorter: (a, b) => (a.turnover_rate ?? 0) - (b.turnover_rate ?? 0),
+      render: (v) => v != null ? v.toFixed(2) + "%" : "-",
+    },
+    {
       title: "今日成交额(亿)",
       dataIndex: "today_turnover_yi",
       key: "today_turnover",
@@ -494,6 +514,39 @@ export default function App() {
       width: 110,
       sorter: (a, b) => (a.today_net_rate ?? -999) - (b.today_net_rate ?? -999),
       render: (_, r) => <NetRateText value={r.today_net_rate} />,
+    },
+    {
+      title: "资金强度",
+      key: "fund_strength",
+      width: 100,
+      sorter: (a, b) => (a.fund_strength ?? -999) - (b.fund_strength ?? -999),
+      render: (_, r) => r.fund_strength != null ? (
+        <span style={{ color: r.fund_strength > 0 ? "#e74c3c" : "#2ecc71", fontWeight: 600 }}>
+          {r.fund_strength.toFixed(3)}%
+        </span>
+      ) : "-",
+    },
+    {
+      title: "连续流入",
+      key: "consecutive",
+      width: 90,
+      sorter: (a, b) => (a.consecutive_inflow_days ?? 0) - (b.consecutive_inflow_days ?? 0),
+      render: (_, r) => r.consecutive_inflow_days > 0 ? (
+        <span style={{ color: "#e74c3c", fontWeight: 600 }}>
+          {r.consecutive_inflow_days} 天
+        </span>
+      ) : <span style={{ color: "#95a5a6" }}>0</span>,
+    },
+    {
+      title: "背离",
+      key: "divergence",
+      width: 70,
+      sorter: (a, b) => (a.divergence ? 1 : 0) - (b.divergence ? 1 : 0),
+      render: (_, r) => r.divergence ? (
+        <Tooltip title="资金净流入但板块价格下跌，警惕出货/接盘陷阱">
+          <span style={{ color: "#e67e22", fontWeight: 700 }}>⚠</span>
+        </Tooltip>
+      ) : null,
     },
     {
       title: "近3日净流入(亿)",
@@ -549,7 +602,7 @@ export default function App() {
         <StrengthTag level={r.strength_level} value={r.strength_value} />
       ),
     },
-  ], []);
+  ], [watchlist, search, toggleWatchlist, loadDetail]);
 
   // 行展开内容
   const expandedRowRender = (record) => (
