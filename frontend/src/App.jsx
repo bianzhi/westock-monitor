@@ -597,7 +597,8 @@ export default function App() {
       key: "strength",
       fixed: "right",
       width: 110,
-      sorter: (a, b) => a.strength_value - b.strength_value,
+      // 兜底 undefined：strength_value 缺失时按极值排（与今日净流入列一致）
+      sorter: (a, b) => (a.strength_value ?? -1e18) - (b.strength_value ?? -1e18),
       render: (_, r) => (
         <StrengthTag level={r.strength_level} value={r.strength_value} />
       ),
