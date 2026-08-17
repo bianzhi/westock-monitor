@@ -105,7 +105,7 @@ if [ -f "$LOG" ]; then
     # （"cannot schedule new futures after interpreter shutdown"，进程重启瞬间
     #  采集线程还在提交任务的噪音，不影响正常运行期数据更新）
     RECENT_ERR=$(grep -E "ERROR|Traceback|NameError" "$LOG" \
-        | grep -vE "h11|uvicorn.error|Invalid HTTP request|interpreter shutdown|cannot schedule new futures" | tail -3)
+        | grep -vE "h11|uvicorn.error|Invalid HTTP request|Traceback \(most recent call last\)|interpreter shutdown|cannot schedule new futures" | tail -3)
     if [ -n "$RECENT_ERR" ]; then
         _warn "最近业务日志有异常" "$(echo "$RECENT_ERR" | head -1)"
     else
@@ -187,26 +187,14 @@ else
     _warn "westock-data-skillhub 未全局安装" "走 npx 每次解析包，慢且易超时；./dev.sh 会自动安装，或手动 npm install -g westock-data-skillhub@1.0.5"
 fi
 
-# CLI 探活：用全局 bin（若已安装）+ --version（与 westock.py _ping_cli 一致）。
-# 不能用 --help：westock-data-skillhub 不支持 --help 会返回非 0；
-# 也不能用 npx：已全局安装时 npx 会重新解析包，慢且易超时。
-if [ -n "$_NPM_BIN" ]; then
-    if "$_NPM_BIN/$_WBIN_NAME" --version >/dev/null 2>&1; then
-        _ok "westock CLI 可执行（--version 正常）"
-    else
-        _fail "westock CLI" "--version 调用失败，fund_flow 将不可用"
-    fi
+# CLI 探活：复用 westock.py 的 _ping_cli（与 health 的 westock_cli 检测完全一致），
+# 避免 diag.sh 自己用全局 bin --version 与 westock.py 实际调用方式（全局 bin 或 npx）
+# 不一致导致的误报。
+_CLI_STATUS=$($VENV_PY -c "from westock import _ping_cli; ok, ver = _ping_cli(); print('ok' if ok else 'fail')" 2>/dev/null)
+if [ "$_CLI_STATUS" = "ok" ]; then
+    _ok "westock CLI 可执行（_ping_cli 与 health 一致）"
 else
-    if command -v timeout &>/dev/null; then
-        _CLI_OK=$(timeout 15 npx -y westock-data-skillhub@1.0.5 --version >/dev/null 2>&1 && echo yes || echo no)
-    else
-        _CLI_OK=$(npx -y westock-data-skillhub@1.0.5 --version >/dev/null 2>&1 && echo yes || echo no)
-    fi
-    if [ "$_CLI_OK" = "yes" ]; then
-        _ok "westock CLI 可执行（npx --version 正常）"
-    else
-        _fail "westock CLI" "--version 调用失败，fund_flow 将不可用"
-    fi
+    _fail "westock CLI" "_ping_cli 探测失败，fund_flow 将不可用"
 fi
 
 # ----------------------------------------------------------
