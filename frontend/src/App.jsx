@@ -660,7 +660,7 @@ export default function App() {
         <StrengthTag level={r.strength_level} value={r.strength_value} />
       ),
     },
-  ], [watchlist, search, toggleWatchlist, loadDetail, strengthDist, consecutiveDist]);
+  ], [watchlist, search, toggleWatchlist, loadDetail, strengthDist, consecutiveDist, strengthFilter, consecutiveFilter]);
 
   // 行展开内容
   const expandedRowRender = (record) => (
@@ -1082,7 +1082,7 @@ export default function App() {
                     expandable={{ expandedRowRender, rowExpandable: () => true }}
                     pagination={{
                       current: pageNum,
-                      pageSize: 50, showSizeChanger: true, pageSizeOptions: [20, 50, 100],
+                      pageSize, showSizeChanger: true, pageSizeOptions: [20, 50, 100],
                       showTotal: (total) => `共 ${total} 个概念板块`,
                       onChange: (page, size) => { setPageNum(page); setPageSize(size); },
                       onShowSizeChange: (_, size) => { setPageNum(1); setPageSize(size); },
