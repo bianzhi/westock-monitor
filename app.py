@@ -604,6 +604,16 @@ def _collector_loop_entry():
     run_collector_loop()
 
 
+def _circ_mv_loop_entry():
+    """流通市值日级采集线程入口（延迟导入，供守护器使用）。
+
+    方案 C（腾讯）落库 change_pct/turnover_rate 依赖此循环在 09:15/15:05 触发，
+    否则涨跌幅/换手率两列无数据。
+    """
+    from collector import run_circ_mv_loop
+    run_circ_mv_loop()
+
+
 def _supervise_thread(target, name: str, restart_delay: int = 10,
                       restart_on_exit: bool = True) -> None:
     """统一线程守护器：被守护线程异常退出后自动重启。
@@ -1824,7 +1834,9 @@ try:
                          args=(_collector_loop_entry, "collector", 10, True)).start()
         threading.Thread(target=_supervise_thread, daemon=True, name="sup_concept_flow",
                          args=(_concept_flow_loop, "concept_flow", 10, True)).start()
-        logger.info("thread supervisors started (startup_init/collector/concept_flow)")
+        threading.Thread(target=_supervise_thread, daemon=True, name="sup_circ_mv",
+                         args=(_circ_mv_loop_entry, "circ_mv", 10, True)).start()
+        logger.info("thread supervisors started (startup_init/collector/concept_flow/circ_mv)")
 
         yield  # 应用运行中...
 
@@ -1894,7 +1906,9 @@ except ImportError:
                          args=(_collector_loop_entry, "collector", 10, True)).start()
         threading.Thread(target=_supervise_thread, daemon=True, name="sup_concept_flow",
                          args=(_concept_flow_loop, "concept_flow", 10, True)).start()
-        logger.info("thread supervisors started (startup_init/collector/concept_flow)")
+        threading.Thread(target=_supervise_thread, daemon=True, name="sup_circ_mv",
+                         args=(_circ_mv_loop_entry, "circ_mv", 10, True)).start()
+        logger.info("thread supervisors started (startup_init/collector/concept_flow/circ_mv)")
 
 
 # ============================================================
