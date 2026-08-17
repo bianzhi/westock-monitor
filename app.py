@@ -756,9 +756,6 @@ async def get_concept_sectors(
 
             summary_3d = _build_summary(records_3d, SUMMARY_3D, None)
             summary_5d = _build_summary(records_5d, SUMMARY_5D, None)
-            # 强度判定输入与展示输入一致：用近 n 日真记录（不足 n 时用已有）
-            strength_records = (cached_daily[:n] if cached_daily else [today_rec])
-            strength = _calc_strength_from_records(strength_records, None, n)
 
             # 概念板块流通市值/涨跌/换手（方案 C 腾讯落库）
             circ_detail = circ_mv_detail.get(code, {})
@@ -781,6 +778,10 @@ async def get_concept_sectors(
             # 背离：净流入 > 0 但涨跌幅 < 0
             c_divergence = (today_net is not None and today_net > 0
                             and c_change_pct is not None and c_change_pct < 0)
+            # 强度判定输入与展示输入一致：用近 n 日真记录（不足 n 时用已有），
+            # 流通市值用真实值（修复硬编码 None 导致全部「普通」的问题）
+            strength_records = (cached_daily[:n] if cached_daily else [today_rec])
+            strength = _calc_strength_from_records(strength_records, c_mv_yi, n)
 
             rows.append(SectorRow(
                 code=code, name=flow.get("name") or get_default_name(code),
