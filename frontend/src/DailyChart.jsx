@@ -41,8 +41,9 @@ export default function DailyChart({ series = [], mode = "net", title = "板块�
           const date = params[0].axisValue;
           let html = `<b>${date}</b><br/>`;
           params.forEach((p) => {
-            if (p.value == null || p.value[1] == null) return;
-            const v = Number(p.value[1]).toFixed(2);
+            // series data 是单个数值（category 轴），p.value 即净流入/成交额
+            if (p.value == null) return;
+            const v = Number(p.value).toFixed(2);
             const color = COLORS[p.seriesIndex % COLORS.length];
             html += `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:4px;"></span>`;
             html += `${p.seriesName}: ${v} 亿<br/>`;

@@ -516,10 +516,9 @@ def backfill_sector_daily(days: int = 10) -> Dict[str, Any]:
     if not all_codes:
         return {"error": "no sector codes"}
 
-    # 最近 N 个交易日（不含今日）
-    today_str = date.today().strftime("%Y%m%d")
-    trading_days = get_last_n_trading_days(days + 1, date.today())
-    history_days = [d for d in trading_days if d.strftime("%Y%m%d") != today_str]
+    # 最近 N 个交易日（含今日；盘中是实时值，收盘后 collect_sector_daily_snapshot 会覆盖最终值）
+    trading_days = get_last_n_trading_days(days, date.today())
+    history_days = trading_days
 
     l2_map = get_default_sector_map()
     backfilled_dates = []
