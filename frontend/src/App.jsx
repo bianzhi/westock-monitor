@@ -48,6 +48,7 @@ export default function App() {
   // 筛选受控状态：columns 每次重建（30s 自动刷新）时保留，不因引用变化重置
   const [strengthFilter, setStrengthFilter] = useState([]);
   const [consecutiveFilter, setConsecutiveFilter] = useState([]);
+  const [scaleFilter, setScaleFilter] = useState([]);
 
   // 概念板块
   const [conceptSectors, setConceptSectors] = useState([]);
@@ -421,6 +422,34 @@ export default function App() {
     const rest = sectors.filter((s) => !inW(s.code));
     return [...starred, ...rest];
   }, [sectors, watchlist]);
+
+  // 多维度筛选：强度档位 + 连续流入 + 规模 三个条件 AND 过滤。
+  // 选中某个/某几个选项后，下方只展示筛选结果（多条件同时生效）。
+  const filteredSectors = useMemo(() => sectorsSorted.filter((r) => {
+    if (strengthFilter.length && !strengthFilter.includes(r.strength_level)) return false;
+    if (consecutiveFilter.length) {
+      const n = r.consecutive_inflow_days ?? 0;
+      const m = consecutiveFilter.some((v) =>
+        v === "5+" ? n >= 5 : v === "3-4" ? n >= 3 && n <= 4 : v === "1-2" ? n >= 1 && n <= 2 : n === 0
+      );
+      if (!m) return false;
+    }
+    if (scaleFilter.length && !scaleFilter.includes(r.scale)) return false;
+    return true;
+  }), [sectorsSorted, strengthFilter, consecutiveFilter, scaleFilter]);
+
+  const filteredConcepts = useMemo(() => conceptSectors.filter((r) => {
+    if (strengthFilter.length && !strengthFilter.includes(r.strength_level)) return false;
+    if (consecutiveFilter.length) {
+      const n = r.consecutive_inflow_days ?? 0;
+      const m = consecutiveFilter.some((v) =>
+        v === "5+" ? n >= 5 : v === "3-4" ? n >= 3 && n <= 4 : v === "1-2" ? n >= 1 && n <= 2 : n === 0
+      );
+      if (!m) return false;
+    }
+    if (scaleFilter.length && !scaleFilter.includes(r.scale)) return false;
+    return true;
+  }), [conceptSectors, strengthFilter, consecutiveFilter, scaleFilter]);
 
   // 表格列定义（useMemo 避免每次渲染重建引用导致 Table 闪烁）
   // watchlist 进 deps：勾选状态变了列渲染要更新；置顶排序在 dataSource 处理
@@ -898,7 +927,7 @@ export default function App() {
                   </Row>
 
                   <Card title="板块强度宽表" style={{ marginBottom: 16 }}>
-                    <Space style={{ marginBottom: 12 }}>
+                    <Space style={{ marginBottom: 12 }} wrap>
                       <Input.Search
                         placeholder="搜索板块名称/代码（实时筛选）"
                         allowClear
@@ -907,11 +936,38 @@ export default function App() {
                         onSearch={setSearch}
                         style={{ width: 260 }}
                       />
+                      <span>强度：</span>
+                      <Select mode="multiple" allowClear value={strengthFilter} onChange={setStrengthFilter}
+                        placeholder="全部强度" style={{ minWidth: 150 }}
+                        options={[
+                          { value: "强", label: "强" },
+                          { value: "偏强", label: "偏强" },
+                          { value: "普通", label: "普通" },
+                          { value: "偏弱", label: "偏弱" },
+                          { value: "弱", label: "弱" },
+                        ]} />
+                      <span>连续流入：</span>
+                      <Select mode="multiple" allowClear value={consecutiveFilter} onChange={setConsecutiveFilter}
+                        placeholder="全部" style={{ minWidth: 150 }}
+                        options={[
+                          { value: "5+", label: "≥5 天" },
+                          { value: "3-4", label: "3-4 天" },
+                          { value: "1-2", label: "1-2 天" },
+                          { value: "0", label: "0 天" },
+                        ]} />
+                      <span>规模：</span>
+                      <Select mode="multiple" allowClear value={scaleFilter} onChange={setScaleFilter}
+                        placeholder="全部规模" style={{ minWidth: 130 }}
+                        options={[
+                          { value: "大盘", label: "大盘" },
+                          { value: "中盘", label: "中盘" },
+                          { value: "小盘", label: "小盘" },
+                        ]} />
                     </Space>
                     <Table
                       rowKey="code"
                       columns={columns}
-                      dataSource={sectorsSorted}
+                      dataSource={filteredSectors}
                       loading={loading}
                       size="small"
                       scroll={{ x: 1400 }}
@@ -1062,7 +1118,7 @@ export default function App() {
               label: `概念板块 (${conceptSectors.length})`,
               children: (
                 <Card title="概念板块宽表" style={{ marginBottom: 16 }}>
-                  <Space style={{ marginBottom: 12 }}>
+                  <Space style={{ marginBottom: 12 }} wrap>
                     <Input.Search
                       placeholder="搜索概念板块名称/代码（实时筛选）"
                       allowClear
@@ -1071,11 +1127,38 @@ export default function App() {
                       onSearch={setSearch}
                       style={{ width: 260 }}
                     />
+                    <span>强度：</span>
+                    <Select mode="multiple" allowClear value={strengthFilter} onChange={setStrengthFilter}
+                      placeholder="全部强度" style={{ minWidth: 150 }}
+                      options={[
+                        { value: "强", label: "强" },
+                        { value: "偏强", label: "偏强" },
+                        { value: "普通", label: "普通" },
+                        { value: "偏弱", label: "偏弱" },
+                        { value: "弱", label: "弱" },
+                      ]} />
+                    <span>连续流入：</span>
+                    <Select mode="multiple" allowClear value={consecutiveFilter} onChange={setConsecutiveFilter}
+                      placeholder="全部" style={{ minWidth: 150 }}
+                      options={[
+                        { value: "5+", label: "≥5 天" },
+                        { value: "3-4", label: "3-4 天" },
+                        { value: "1-2", label: "1-2 天" },
+                        { value: "0", label: "0 天" },
+                      ]} />
+                    <span>规模：</span>
+                    <Select mode="multiple" allowClear value={scaleFilter} onChange={setScaleFilter}
+                      placeholder="全部规模" style={{ minWidth: 130 }}
+                      options={[
+                        { value: "大盘", label: "大盘" },
+                        { value: "中盘", label: "中盘" },
+                        { value: "小盘", label: "小盘" },
+                      ]} />
                   </Space>
                   <Table
                     rowKey="code"
                     columns={columns}
-                    dataSource={conceptSectors}
+                    dataSource={filteredConcepts}
                     loading={conceptLoading}
                     size="small"
                     scroll={{ x: 1400 }}
