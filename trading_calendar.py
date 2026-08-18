@@ -27,32 +27,38 @@ logger = logging.getLogger(__name__)
 TRADING_DAYS_CACHE = DATA_DIR / "trading_days.json"
 
 
-def has_tushare_token() -> bool:
-    """活性探测：Tushare token 是否就绪。
+def _resolve_tushare_token() -> Optional[str]:
+    """解析 tushare token（环境变量优先，回退 ~/.tushare/token 文件）。
 
-    优先读环境变量 SYSTEM_TUSHARE_TOKEN（与 circ_mv_collector 一致），
-    否则回退到 tushare.get_token()（~/.tushare/token 文件）。
-    用于 /api/health 数据源活性体检。
+    不 import tushare、不调 ts.get_token()，避免没 token 时 tushare 库
+    打印"请设置 token 凭证码"的噪音提示。
     """
     env_tok = os.environ.get("SYSTEM_TUSHARE_TOKEN", "").strip()
     if env_tok:
-        return True
-    try:
-        import tushare as ts
-        return bool(ts.get_token())
-    except ImportError:
-        return False
-    except Exception:
-        return False
+        return env_tok
+    token_file = Path.home() / ".tushare" / "token"
+    if token_file.exists():
+        try:
+            tok = token_file.read_text().strip()
+            if tok:
+                return tok
+        except OSError:
+            pass
+    return None
+
+
+def has_tushare_token() -> bool:
+    """活性探测：Tushare token 是否就绪（不触发 tushare 报错提示）。"""
+    return _resolve_tushare_token() is not None
 
 
 def _try_tushare_cal() -> Optional[Set[str]]:
     """尝试从 Tushare 拉交易日历。失败返回 None。"""
+    token = _resolve_tushare_token()
+    if not token:
+        return None
     try:
         import tushare as ts
-        token = ts.get_token()  # 需要用户已配置 ~/.tushare/token
-        if not token:
-            return None
         pro = ts.pro_api(token)
         # 拉取近 2 年的交易日
         today = date.today()
