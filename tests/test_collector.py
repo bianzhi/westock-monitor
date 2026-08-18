@@ -57,6 +57,11 @@ class _EmptyStorage:
 # 分段差分估算
 # ============================================================
 class TestSegmentedDifferencing:
+    @pytest.fixture(autouse=True)
+    def _isolate_storage(self, monkeypatch):
+        """隔离真实 sector_daily 落库数据，避免历史日读到真实值而非估算值。"""
+        monkeypatch.setattr(collector, "get_storage", lambda: _EmptyStorage())
+
     def test_today_first_no_estimated_flag(self, monkeypatch):
         """今日记录（records[0]）不应有 estimated 标记"""
         monkeypatch.setattr(collector, "fund_flow", _mock_fund_flow_today_only())

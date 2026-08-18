@@ -481,6 +481,96 @@ def collect_sector_daily_snapshot() -> Dict[str, Any]:
     return {"saved": 0, "trade_date": today, "elapsed": round(elapsed, 1)}
 
 
+def backfill_sector_daily(days: int = 10) -> Dict[str, Any]:
+    """回溯填充最近 N 个交易日的日净流入到 sector_daily。
+
+    用于服务刚启动、历史日未落库时补齐日线图数据。
+    用 westock fund_flow --date 查每个历史交易日，落库（upsert 按 code+trade_date 去重，幂等）。
+
+    Args:
+        days: 回溯交易日数（默认 10，不含今日；今日由 collect_sector_daily_snapshot 落库）
+
+    Returns:
+        {"backfilled_days": N, "total_records": M, "trade_dates": [...]}
+    """
+    from westock import fund_flow as _ff, extract_main_net_flow as _emnf
+    from westock_fund_metrics import calc_sector_metrics
+    from sectors import get_default_sector_map
+    from concept_sectors import get_default_name as _gdn
+
+    storage = get_storage()
+
+    # 全板块代码：二级(pt018) + 概念(pt02)，去重合并
+    all_codes = []
+    seen = set()
+    for c in get_sector_codes():
+        if c not in seen:
+            seen.add(c)
+            all_codes.append(c)
+    from concept_sectors import get_default_codes as _gdc
+    for c in _gdc():
+        if c not in seen:
+            seen.add(c)
+            all_codes.append(c)
+
+    if not all_codes:
+        return {"error": "no sector codes"}
+
+    # 最近 N 个交易日（不含今日）
+    today_str = date.today().strftime("%Y%m%d")
+    trading_days = get_last_n_trading_days(days + 1, date.today())
+    history_days = [d for d in trading_days if d.strftime("%Y%m%d") != today_str]
+
+    l2_map = get_default_sector_map()
+    backfilled_dates = []
+    total_records = 0
+
+    for td in history_days:
+        td_str = td.strftime("%Y%m%d")
+        try:
+            flow_records = _ff(all_codes, raw=True, asof_date=td.isoformat())
+        except Exception as e:
+            logger.warning("backfill_sector_daily %s fund_flow failed: %s", td_str, e)
+            continue
+        if not flow_records:
+            logger.info("backfill_sector_daily %s: no data", td_str)
+            continue
+
+        records = []
+        for r in flow_records:
+            code = r.get("code") or r.get("SecuCode")
+            if not code:
+                continue
+            net = _emnf(r)
+            metrics = calc_sector_metrics(r, TURNOVER_METHOD) if r else {}
+            name = (r.get("name")
+                    or (l2_map.get(code, {}) or {}).get("name")
+                    or _gdn(code)
+                    or code)
+            records.append({
+                "code": code,
+                "name": name,
+                "trade_date": td_str,
+                "net_flow": net,
+                "turnover": metrics.get("turnover"),
+            })
+
+        if records:
+            n = storage.upsert_sector_daily_batch(records)
+            total_records += n
+            backfilled_dates.append(td_str)
+            logger.info("backfill_sector_daily %s: %d records", td_str, n)
+
+    storage.cleanup_sector_daily(_SECTOR_DAILY_KEEP)
+    logger.info("backfill_sector_daily: done, %d days, %d records",
+                len(backfilled_dates), total_records)
+    return {
+        "backfilled_days": len(backfilled_dates),
+        "total_records": total_records,
+        "trade_dates": backfilled_dates,
+    }
+
+
 def verify_daily_against_api(threshold: float = 0.2) -> Dict[str, Any]:
     """用落库的日级数据校验 westock 接口的 5D/10D 累计字段。
 
