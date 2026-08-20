@@ -257,6 +257,14 @@ export default function App() {
     }
   }, [compareMethod, compareStart, compareEnd, compareSource, manualCodes]);
 
+  // 筛选条件变化时自动重新加载（防抖 400ms，避免输入代码时每字符都请求）。
+  // loadCompare 依赖 compareMethod/start/end/source/manualCodes，任一变化即触发；
+  // compareMode（每分钟/累计/净额率）只影响前端渲染，不在此依赖中，故不触发重新拉取。
+  useEffect(() => {
+    const timer = setTimeout(() => { loadCompare(); }, 400);
+    return () => clearTimeout(timer);
+  }, [loadCompare]);
+
   // 防抖搜索
   const handleSearchChange = useCallback((e) => {
     const v = e.target.value;
@@ -1108,7 +1116,11 @@ export default function App() {
                     </Space>
                   </Card>
                   <CompareChart
-                    title={`板块分时对比 (${compareMethod === "rank" ? "净流入排名" : "编号"} ${compareStart}-${compareEnd})`}
+                    title={
+                      manualCodes.trim()
+                        ? `板块分时对比 (指定: ${manualCodes.trim()})`
+                        : `板块分时对比 (${compareMethod === "rank" ? "净流入排名" : "编号"} ${compareStart}-${compareEnd})`
+                    }
                     mode={compareMode}
                     series={compareData?.series || []}
                     height={520}
