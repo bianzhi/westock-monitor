@@ -182,6 +182,23 @@ export default function App() {
     }
   }, [dailyCodes, dailyDays]);
 
+  // 跳转到某板块的日线图：设置代码 → 切 daily Tab → 自动加载（直接用入参 code 请求，
+  // 避免依赖 dailyCodes 的异步 setState 时序）
+  const gotoDaily = useCallback(async (code) => {
+    if (!code) return;
+    setDailyCodes(code);
+    setActiveTab("daily");
+    setDailyLoading(true);
+    try {
+      const data = await fetchSectorDailyHistory(code, dailyDays);
+      setDailyData(data);
+    } catch (e) {
+      message.error("加载日线图失败: " + (e.response?.data?.detail || e.message));
+    } finally {
+      setDailyLoading(false);
+    }
+  }, [dailyDays]);
+
   // 高频模式
   const [focusEnabled, setFocusEnabled] = useState(false);
   const autoRefreshRef = useRef(null);
@@ -517,7 +534,7 @@ export default function App() {
       width: 140,
       sorter: (a, b) => (a.name || "").localeCompare(b.name || ""),
       render: (text, record) => (
-        <a onClick={() => loadDetail(record.code)}>{text}</a>
+        <a onClick={() => gotoDaily(record.code)}>{text}</a>
       ),
       filteredValue: search ? [search] : null,
       onFilter: (val, rec) => {
@@ -1009,7 +1026,7 @@ export default function App() {
                 <L1Tab
                   l1Data={l1Data}
                   l1Loading={l1Loading}
-                  onSwitchToSector={(s) => { setActiveTab("l2"); setSearch(s.name); setTimeout(() => loadDetail(s.code), 100); }}
+                  onSwitchToSector={(s) => gotoDaily(s.code)}
                   onDrillDownL1={(record) => {
                     // 宏观下钻：点一级行业名 → 切 l2 + 筛选该行业名（行业名即二级板块名前缀）
                     setActiveTab("l2");
