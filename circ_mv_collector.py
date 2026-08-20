@@ -413,61 +413,60 @@ def _empty_result(today_str: str) -> Dict:
 
 
 def collect_all_sectors_circ_mv_tencent(stock_map=None) -> Dict[str, Dict]:
-    """方案 C：成分股 + 腾讯 qt.gtimg.cn 个股流通市值累加（免费无需 token）。
+    """方案 C：直接用板块代码查腾讯 qt.gtimg.cn 行情（免费无需 token）。
 
-    比 Tushare 方案 A 更可靠（腾讯接口就是自选股 App 自己用的数据源），
-    同时得到板块涨跌幅/换手率（按流通市值加权）。
+    关键修正（2026-08-20）：腾讯自选股 App 显示的板块「涨跌幅/换手率」是
+    板块指数自身的涨跌幅/换手率，而非「成分股按流通市值加权」的结果。
+    两者口径不同，导致涨跌幅/换手率与 App 对不齐，进而让「背离」等衍生指标失真。
+
+    实测腾讯行情接口对板块代码（pt 前缀）直接返回板块指数自身行情：
+        pt02251441 CRO: [32]=8.37(涨跌幅%) [38]=5.87(换手率%) [44]=8777.19(流通市值亿)
+    与 `sector ranking` 返回的 CRO changePct=8.37 / turnoverRate=5.87 完全一致。
+
+    故改为直接查板块代码本身（与二级/概念板块代码空间一致），
+    涨跌幅/换手率/流通市值全部取板块指数自身字段，不再依赖成分股采集与加权。
 
     Args:
-        stock_map: 可选 {pt_code: [{code, ...}]}，不传则自动采集成分股
+        stock_map: 兼容旧签名，已弃用（不再采集成分股）；传入时忽略
 
     Returns:
         {pt_code: {circ_mv, circ_mv_yi, change_pct, turnover_rate,
                    stock_count, valid_count, skip_count, fail_rate,
                    is_estimated, source="tencent", trade_date}}
     """
-    from tencent_quote import fetch_stock_quotes, aggregate_sector_metrics
+    from tencent_quote import fetch_stock_quotes
+    from sectors import get_default_codes as _l2_codes
+    from concept_sectors import get_default_codes as _concept_codes
 
-    if stock_map is None:
-        stock_map = collect_constituents_all_sectors()
-    if not stock_map:
-        logger.warning("collect_all_sectors_circ_mv_tencent: no stock_map, abort")
+    all_pt_codes = list(_l2_codes())
+    all_pt_codes.extend(c for c in _concept_codes() if c not in all_pt_codes)
+    if not all_pt_codes:
+        logger.warning("collect_all_sectors_circ_mv_tencent: no sector codes, abort")
         return {}
 
     today_str = date.today().strftime("%Y%m%d")
-    all_pt_codes = list(stock_map.keys())
+    logger.info("collect_all_sectors_circ_mv_tencent: %d sector codes (l2 + concept)",
+                len(all_pt_codes))
 
-    # 扁平化所有成分股，去重
-    all_stocks = set()
-    for stocks in stock_map.values():
-        for s in stocks:
-            wcode = s.get("code") if isinstance(s, dict) else s
-            if wcode:
-                all_stocks.add(wcode)
-    logger.info("collect_all_sectors_circ_mv_tencent: %d unique stocks across %d sectors",
-                len(all_stocks), len(stock_map))
-
-    # 批量腾讯行情（免费无需 token）
-    quotes = fetch_stock_quotes(sorted(all_stocks))
+    # 直接查板块指数行情（qt.gtimg.cn 对 pt 代码返回板块自身涨跌幅/换手率/市值）
+    quotes = fetch_stock_quotes(all_pt_codes)
 
     result: Dict[str, Dict] = {}
     for pt_code in all_pt_codes:
-        stock_codes = stock_map.get(pt_code, [])
-        if not stock_codes:
+        q = quotes.get(pt_code)
+        if not q or q.get("circ_mv") is None:
             result[pt_code] = _empty_result(today_str)
             continue
-        wcodes = [s.get("code") if isinstance(s, dict) else s for s in stock_codes]
-        agg = aggregate_sector_metrics(quotes, wcodes)
         result[pt_code] = {
-            "circ_mv": agg["circ_mv"],
-            "circ_mv_yi": agg["circ_mv_yi"],
-            "change_pct": agg["change_pct"],
-            "turnover_rate": agg["turnover_rate"],
-            "stock_count": agg["stock_count"],
-            "valid_count": agg["valid_count"],
-            "skip_count": agg["stock_count"] - agg["valid_count"],
-            "fail_rate": agg["fail_rate"],
-            "is_estimated": agg["fail_rate"] > 0.5,
+            "circ_mv": q.get("circ_mv"),
+            "circ_mv_yi": q.get("circ_mv_yi"),
+            "change_pct": q.get("change_pct"),
+            "turnover_rate": q.get("turnover_rate"),
+            "stock_count": 0,            # 板块指数行情无成分股统计
+            "valid_count": 1,
+            "skip_count": 0,
+            "fail_rate": 0.0,
+            "is_estimated": False,
             "source": "tencent",
             "trade_date": today_str,
         }

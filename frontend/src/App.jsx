@@ -510,8 +510,10 @@ export default function App() {
         <a onClick={() => loadDetail(record.code)}>{text}</a>
       ),
       filteredValue: search ? [search] : null,
-      onFilter: (val, rec) =>
-        rec.name?.includes(val) || rec.code?.includes(val),
+      onFilter: (val, rec) => {
+        const v = (val || "").toLowerCase();
+        return (rec.name || "").toLowerCase().includes(v) || (rec.code || "").toLowerCase().includes(v);
+      },
     },
     { title: "代码", dataIndex: "code", key: "code", width: 110, sorter: (a, b) => (a.code || "").localeCompare(b.code || "") },
     {
@@ -1061,10 +1063,11 @@ export default function App() {
                       <Select
                         value={compareMode}
                         onChange={setCompareMode}
-                        style={{ width: 80 }}
+                        style={{ width: 100 }}
                         options={[
                           { value: "minute", label: "每分钟" },
                           { value: "cumulative", label: "累计" },
+                          { value: "net_rate", label: "净额率" },
                         ]}
                       />
                       <Button type="primary" icon={<ReloadOutlined />} onClick={loadCompare} loading={compareLoading}>

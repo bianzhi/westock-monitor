@@ -38,7 +38,7 @@ function fmtTime(minutes) {
  * 多板块分时对比图
  * props:
  *   series = [{ code, name, rank, points: [{time, timestamp, minute_delta, main_net_flow, is_open_anchor}, ...] }, ...]
- *   mode = "minute" | "cumulative"  — 每分钟净流入 / 当日累计净流入
+ *   mode = "minute" | "cumulative" | "net_rate"  — 每分钟净流入 / 当日累计净流入 / 当日净额率
  *   title = 标题
  *   height = 图表高度
  *
@@ -55,6 +55,7 @@ export default function CompareChart({ series = [], mode = "minute", title = "�
     }
 
     const isCumulative = mode === "cumulative";
+    const isNetRate = mode === "net_rate";
 
     // 1. 收集所有板块交易时段内的分钟点（去重排序），作为 category 轴 data
     const timeSet = new Set();
@@ -77,6 +78,11 @@ export default function CompareChart({ series = [], mode = "minute", title = "�
         const t = d.getHours() * 60 + d.getMinutes();
         if (isCumulative) {
           if (p.main_net_flow != null) valueMap.set(t, Number(p.main_net_flow) / 1e8);
+        } else if (isNetRate) {
+          // 净额率模式：当日净额率 = 当日累计净流入 ÷ 当日累计成交额 × 100(%)
+          if (p.main_net_flow != null && p.turnover != null && Number(p.turnover) !== 0) {
+            valueMap.set(t, (Number(p.main_net_flow) / Number(p.turnover)) * 100);
+          }
         } else {
           // 分钟模式：跳过开盘锚点（is_open_anchor）和空值
           if (!p.is_open_anchor && p.minute_delta != null) valueMap.set(t, Number(p.minute_delta) / 1e8);
@@ -102,10 +108,11 @@ export default function CompareChart({ series = [], mode = "minute", title = "�
             .sort((a, b) => Number(b.value) - Number(a.value));
           let html = `<b>${axisValue}</b><br/>`;
           sorted.forEach((p) => {
-            const v = Number(p.value).toFixed(3);
+            const v = Number(p.value).toFixed(isNetRate ? 2 : 3);
             const color = COLORS[p.seriesIndex % COLORS.length];
+            const unit = isNetRate ? "%" : " 亿";
             html += `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:4px;"></span>`;
-            html += `${p.seriesName}: ${v} 亿<br/>`;
+            html += `${p.seriesName}: ${v}${unit}<br/>`;
           });
           return html;
         },
@@ -127,7 +134,7 @@ export default function CompareChart({ series = [], mode = "minute", title = "�
       },
       yAxis: {
         type: "value",
-        name: isCumulative ? "当日累计净流入(亿)" : "本分钟净流入(亿)",
+        name: isNetRate ? "当日净额率(%)" : isCumulative ? "当日累计净流入(亿)" : "本分钟净流入(亿)",
         splitLine: { lineStyle: { type: "dashed", color: "#e0e0e0" } },
       },
       series: series.map((s, idx) => {
@@ -143,7 +150,7 @@ export default function CompareChart({ series = [], mode = "minute", title = "�
           symbolSize: showSymbol ? 5 : 0,
           lineStyle: { width: 2, color: COLORS[idx % COLORS.length] },
           itemStyle: { color: COLORS[idx % COLORS.length] },
-          connectNulls: isCumulative, // 累计模式连接 null 点，画连续折线
+          connectNulls: isCumulative || isNetRate, // 累计/净额率模式连接 null 点，画连续折线
           data,
         };
       }),

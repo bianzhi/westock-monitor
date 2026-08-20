@@ -1291,20 +1291,23 @@ def run_circ_mv_loop(force: bool = False) -> None:
     while True:
         now = datetime.now()
         today_str = now.strftime("%Y%m%d")
-        now_hm = now.strftime("%H:%M")
 
-        # 检查是否命中采集时点且今日未触发
-        if now_hm in target_times:
-            fired_today = fired.setdefault(today_str, set())
-            if now_hm not in fired_today:
-                logger.info("circ_mv loop: hit schedule %s, triggering", now_hm)
+        # 检查已过目标时点且当日未触发（而非精确分钟匹配，避免 sleep 周期错过 09:15/15:05）
+        fired_today = fired.setdefault(today_str, set())
+        for target_hm in target_times:
+            try:
+                target_dt = datetime.strptime(f"{today_str} {target_hm}", "%Y%m%d %H:%M")
+            except ValueError:
+                continue
+            if now >= target_dt and target_hm not in fired_today:
+                logger.info("circ_mv loop: hit schedule %s, triggering", target_hm)
                 try:
                     result = collect_circ_mv_snapshot()
                     logger.info("circ_mv snapshot: %s", result)
                 except Exception as e:
                     logger.error("circ_mv loop error: %s", e, exc_info=True)
                 finally:
-                    fired_today.add(now_hm)
+                    fired_today.add(target_hm)
 
         # 清理过期日期记录（只保留今日）
         expired = [d for d in fired if d != today_str]

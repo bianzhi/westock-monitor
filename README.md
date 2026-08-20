@@ -3,6 +3,12 @@
 > 基于 `westock-data` CLI（腾讯自选股官方数据）+ 腾讯原始 HTTP 接口，
 > 实时跟踪申万二级板块的主力资金流向，通过连续 n 日的净额率指标判定板块强度。
 
+## 🎯 数据源原则
+
+> **所有数据优先查 `westock-data` CLI；只有 westock 实在查不到、又确实需要的字段，才去计算或走腾讯原始 HTTP 兜底。**
+> 不得本末倒置——能用接口直接拿到的值，不要用「成分股加权/反推/估算」等手段自己算。
+> 落地到实现：`westock.py` 是唯一 westock 调用封装；`tencent_quote.py` 等仅补 westock 缺失的字段。
+
 ## ✨ 功能特性
 
 - **板块覆盖**：申万 2021 版二级行业（硬编码 134 个，支持接口刷新）
@@ -57,7 +63,7 @@ westock-monitor/
 ├── config.py              # 全局配置（n日窗口、规模分档阈值等可配项）
 ├── sectors.py             # 申万二级板块代码列表（134个硬编码）
 ├── westock.py             # westock-data CLI 封装（subprocess + 批量分批）
-├── tencent_api.py         # 腾讯原始 HTTP 接口封装（成交额 + 流通市值）
+├── tencent_quote.py       # 腾讯行情 HTTP 接口封装（涨跌幅/换手率/流通市值，仅补 westock 缺失字段）
 ├── strength.py            # 强度计算（5档判定 + 分段线性插值 + n日窗口可配）
 ├── collector.py           # 采集层（分钟级差分 + 日级实时拉取 + 板块列表刷新）
 ├── storage.py             # 存储层（SQLite + 仅缓存最近5日分钟数据）
