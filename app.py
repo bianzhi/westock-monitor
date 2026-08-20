@@ -1186,11 +1186,21 @@ async def get_minute_compare(
                 if tok not in selected:
                     selected.append(tok)
                 continue
-            # 名称模糊：包含匹配（大小写不敏感）
+            # 名称精确匹配（大小写不敏感）优先，避免英文子串误伤（如 CRO 误带 MicroLED）
             tlow = tok.lower()
-            for c, name in merged_name.items():
-                if name and tlow in str(name).lower() and c not in selected:
-                    selected.append(c)
+            exact = [c for c, n in merged_name.items()
+                     if n and str(n).lower() == tlow]
+            if exact:
+                for c in exact:
+                    if c not in selected:
+                        selected.append(c)
+                continue
+            # 仅中文 token 才做包含匹配（中文无子串误伤问题，且支持「半导体」匹配到
+            # 「半导体产业」等衍生板块）；英文 token 不做包含匹配，只精确匹配
+            if any("\u4e00" <= ch <= "\u9fff" for ch in tok):
+                for c, name in merged_name.items():
+                    if name and tlow in str(name).lower() and c not in selected:
+                        selected.append(c)
 
         # 后续 series 组装用合并映射取 name，保证跨清单（l2/concept）也能正确显示名称
         sector_map = {c: {"name": n} for c, n in merged_name.items()}
