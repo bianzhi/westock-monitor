@@ -27,18 +27,28 @@ export function MinuteChart({ points = [] }) {
         ? null
         : Number(p.turnover_delta) / 1e8
     );
+    // 今日净额率(%) = 当日累计净流入 ÷ 当日累计成交额 × 100
+    const netRate = points.map((p) =>
+      p.main_net_flow != null && p.turnover != null && Number(p.turnover) !== 0
+        ? (Number(p.main_net_flow) / Number(p.turnover)) * 100
+        : null
+    );
     return {
       title: { text: "当日分钟级资金流", left: "center", textStyle: { fontSize: 14 } },
-      tooltip: { trigger: "axis" },
+      tooltip: {
+        trigger: "axis",
+        valueFormatter: (v) => (v == null ? "-" : Number(v).toFixed(3)),
+      },
       legend: {
-        data: ["累计净流入(亿)", "本分钟净流入(亿)", "累计成交额(亿)", "本分钟成交额(亿)"],
+        data: ["累计净流入(亿)", "本分钟净流入(亿)", "累计成交额(亿)", "本分钟成交额(亿)", "今日净额率(%)"],
         top: 28,
       },
-      grid: { left: 50, right: 30, top: 80, bottom: 40 },
+      grid: { left: 50, right: 70, top: 80, bottom: 40 },
       xAxis: { type: "category", data: xs, axisLabel: { rotate: 45, fontSize: 10 } },
       yAxis: [
         { type: "value", name: "净流入(亿)" },
         { type: "value", name: "成交额(亿)" },
+        { type: "value", name: "净额率(%)", position: "right", splitLine: { show: false } },
       ],
       series: [
         {
@@ -75,6 +85,14 @@ export function MinuteChart({ points = [] }) {
               params.value >= 0 ? "#f39c12" : "#e67e22",
           },
           data: turnoverDelta,
+        },
+        {
+          name: "今日净额率(%)",
+          type: "line",
+          yAxisIndex: 2,
+          smooth: true,
+          itemStyle: { color: "#9b59b6" },
+          data: netRate,
         },
       ],
     };
