@@ -47,7 +47,7 @@ from storage import get_storage
 from collector import (
     load_sectors, get_sector_codes, refresh_sectors,
     collect_minute_snapshot, collect_all_sectors_daily,
-    collect_daily_records, is_trading_time,
+    is_trading_time,
 )
 from circ_mv_collector import collect_all_sectors_circ_mv
 from strength import (
@@ -58,7 +58,7 @@ from westock_fund_metrics import calc_sector_metrics_batch, calc_turnover, calc_
 from data_cache import (
     init_cache, is_ready, refresh_cache, get_max_n,
     get_codes as cache_get_codes, get_sectors as cache_get_sectors,
-    get_daily_map, get_circ_mv_map, get_circ_mv, start_background_refresh,
+    get_daily, get_daily_map, get_circ_mv_map, get_circ_mv, start_background_refresh,
     trigger_background_refresh, is_refresh_in_progress, get_refresh_last_error,
     get_updated_time, get_init_status,
 )
@@ -598,6 +598,21 @@ def _concept_flow_loop():
         _t.sleep(CONCEPT_FLOW_TTL_SEC)
 
 
+def _spawn_concept_flow_refresh() -> None:
+    """异步触发一次概念板块 flow 后台刷新（不阻塞请求路径）。
+
+    用于缓存过期/缺失时：本请求先用旧缓存或走兜底，刷新交给后台线程完成。
+    `_refresh_concept_flow_cache` 内部有 `_concept_flow_refreshing` 去重锁，
+    并发多次触发只会真正拉取一次。
+    """
+    def _run():
+        try:
+            _refresh_concept_flow_cache()
+        except Exception as e:
+            logger.warning("concept flow async refresh failed: %s", e)
+    threading.Thread(target=_run, daemon=True, name="concept_flow_async_refresh").start()
+
+
 def _collector_loop_entry():
     """collector 线程入口（延迟导入，供守护器使用）。"""
     from collector import run_collector_loop
@@ -704,13 +719,16 @@ async def get_concept_sectors(
         with _concept_flow_lock:
             cached = _concept_flow_cache.get("flow_map", {})
             cached_ts = _concept_flow_cache.get("ts", 0)
-        if cached and (now - cached_ts) < CONCEPT_FLOW_TTL_SEC:
+        if cached:
+            # 有过期但非空缓存：先用旧缓存顶上，异步触发后台刷新，不同步调 CLI
+            if (now - cached_ts) >= CONCEPT_FLOW_TTL_SEC:
+                _spawn_concept_flow_refresh()
             flow_map = cached
         else:
-            # 缓存缺失/过期：同步拉一次（首次启动预热），后续由后台线程续
-            flow_map = _refresh_concept_flow_cache()
+            # 缓存完全缺失：异步触发后台刷新，本请求走兜底（503/空列表），不同步调 CLI
+            _spawn_concept_flow_refresh()
+            raise RuntimeError("concept flow cache empty, background refresh triggered")
         if not flow_map:
-            # 后台拉取失败且无缓存：触发一次后台刷新，返回旧缓存或空
             raise RuntimeError("concept flow cache empty")
 
         rows = []
@@ -952,20 +970,29 @@ async def get_sector_detail(
             "strength": strength,
         }
 
-    # l2 板块：走缓存 + 日级数据
+    # l2 板块：走缓存（采集后台线程已落库/入缓存），不在此同步调 CLI
     meta = storage.get_sector_meta(code)
     if not meta:
         raise HTTPException(status_code=404, detail=f"sector {code} not found")
 
-    records = collect_daily_records(code, n=n)
+    # 缓存未就绪：与宽表一致，返回 503 让前端重试，不在请求路径上同步拉外部接口
+    if not is_ready():
+        raise HTTPException(
+            status_code=503,
+            detail="data cache is still warming up, please retry in a few seconds",
+        )
+
+    records = get_daily(code)
+    actual_n = min(n, get_max_n() or n)
+
     # 流通市值优先级：sector_circ_mv 缓存 → sector_meta
     circ_mv_yi = meta.get("circ_mv_yi")
     cached_mv = storage.get_sector_circ_mv(code)
     if cached_mv and cached_mv.get("circ_mv_yi"):
         circ_mv_yi = cached_mv["circ_mv_yi"]
 
-    strength = _calc_strength_from_records(records, circ_mv_yi, n)
-    history = _build_history(records, None, n)
+    strength = _calc_strength_from_records(records, circ_mv_yi, actual_n)
+    history = _build_history(records, None, actual_n)
     summary_3d = _build_summary(records, SUMMARY_3D, circ_mv_yi)
     summary_5d = _build_summary(records, SUMMARY_5D, circ_mv_yi)
 
@@ -975,7 +1002,7 @@ async def get_sector_detail(
         "l1": meta.get("l1"),
         "circ_mv_yi": circ_mv_yi,
         "scale": meta.get("scale"),
-        "n_window": n,
+        "n_window": actual_n,
         "records": history,
         "summary_3d": summary_3d,
         "summary_5d": summary_5d,
@@ -1384,16 +1411,9 @@ async def get_sectors_history(
 ):
     """历史回看：查询指定日期的板块强度宽表。
 
-    调用 westock fund flow --date 拉取指定日期的资金流数据，
-    用当日累计 + 5D/10D/20D 分段差分重建近 n 日历史，计算强度。
-    注意：历史数据量较大时耗时 2-5s（实时 CLI 调用），建议前端加 loading 状态。
+    从 sector_daily 落库表读取（采集后台线程收盘后已写入），
+    不在请求路径上同步调 CLI。库中无该日期数据时返回空列表。
     """
-    try:
-        daily_map, circ_mv_map = collect_all_sectors_daily(n=n, asof_date=date)
-    except Exception as e:
-        logger.error("history collect failed for %s: %s", date, e, exc_info=True)
-        raise HTTPException(status_code=503, detail=f"data fetch failed: {e}")
-
     storage = get_storage()
     _ensure_meta()
     sector_list = load_sectors()
@@ -1402,18 +1422,38 @@ async def get_sectors_history(
     if not sector_list:
         raise HTTPException(status_code=500, detail="no sector data")
 
+    # date(YYYY-MM-DD) → YYYYMMDD
+    try:
+        asof_td = datetime.strptime(date, "%Y-%m-%d").strftime("%Y%m%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid date format, expect YYYY-MM-DD")
+
+    codes = [sec["code"] for sec in sector_list]
+    db_map = storage.get_sector_daily_asof(codes, asof_td, n)
+
     rows: List[SectorRow] = []
 
     for sec in sector_list:
         code = sec["code"]
-        records = daily_map.get(code, [])
+        db_records = db_map.get(code, [])
+        # 落库记录缺 date(ISO) 字段，补上；保持 trade_date 倒序（最近在前）
+        records = []
+        for d in db_records[:n]:
+            td = d.get("trade_date")
+            records.append({
+                "date": f"{td[:4]}-{td[4:6]}-{td[6:8]}" if td and len(td) == 8 else td,
+                "trade_date": td,
+                "net_flow": d.get("net_flow"),
+                "turnover": d.get("turnover"),
+                "estimated": False,
+            })
         meta = meta_map.get(code, {})
 
         today_rec = records[0] if records else {}
         today_net = today_rec.get("net_flow")
         today_turnover = today_rec.get("turnover")
 
-        circ_mv_yi = circ_mv_map.get(code) or meta.get("circ_mv_yi")
+        circ_mv_yi = meta.get("circ_mv_yi")
         scale = get_scale(circ_mv_yi) if circ_mv_yi else (meta.get("scale") or "小盘")
 
         history = _build_history(records, None, n)

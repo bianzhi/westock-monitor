@@ -889,6 +889,40 @@ class Storage:
                 result[d["code"]].append(d)
             return result
 
+    def get_sector_daily_asof(self, codes: List[str], asof_date: str, days: int = 30) -> Dict[str, List[Dict]]:
+        """获取板块截至指定交易日的近 N 交易日净流入记录（历史回看数据源）。
+
+        与 get_sector_daily_batch 不同：本方法按 asof_date 截止过滤，
+        用于「历史回看」从落库表读数据，而非实时调 CLI。
+
+        Args:
+            codes: 板块代码列表
+            asof_date: 截止交易日 YYYYMMDD（含）
+            days: 往回取的天数
+
+        Returns:
+            {code: [{trade_date, net_flow, turnover}, ...]}（trade_date 倒序，截至 asof_date）
+        """
+        if not codes:
+            return {}
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            placeholders = ",".join("?" * len(codes))
+            cur.execute(
+                f"""SELECT code, name, trade_date, net_flow, turnover
+                    FROM sector_daily
+                    WHERE code IN ({placeholders}) AND trade_date <= ?
+                    ORDER BY trade_date DESC
+                    LIMIT ?""",
+                codes + [asof_date, days * len(codes)],
+            )
+            result: Dict[str, List[Dict]] = {c: [] for c in codes}
+            for row in cur.fetchall():
+                d = dict(row)
+                result[d["code"]].append(d)
+            return result
+
     def cleanup_sector_daily(self, keep_days: int = 30) -> int:
         """清理超过 keep_days 天的全板块日净流入记录。"""
         from datetime import date, timedelta
