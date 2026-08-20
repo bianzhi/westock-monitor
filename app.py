@@ -1167,9 +1167,33 @@ async def get_minute_compare(
         sector_map = get_default_sector_map()
         all_codes = get_sector_codes()
 
-    # 手动指定模式
+    # 手动指定模式：支持代码精确匹配 + 名称模糊匹配（跨二级+概念清单，大小写不敏感）
     if method == "manual" and codes:
-        selected = [c.strip() for c in codes.split(",") if c.strip()]
+        tokens = [c.strip() for c in codes.split(",") if c.strip()]
+        # 合并二级 + 概念 的 code→name，用于代码精确/名称模糊匹配，也用于后续 name 显示
+        from sectors import get_default_sector_map as _l2_map
+        from concept_sectors import get_concept_sectors as _concept_map
+        merged_name = {}
+        for c, info in _l2_map().items():
+            merged_name[c] = info.get("name") if isinstance(info, dict) else str(info)
+        for c, n in _concept_map().items():
+            merged_name.setdefault(c, n)
+
+        selected = []
+        for tok in tokens:
+            if tok in merged_name:
+                # 精确代码
+                if tok not in selected:
+                    selected.append(tok)
+                continue
+            # 名称模糊：包含匹配（大小写不敏感）
+            tlow = tok.lower()
+            for c, name in merged_name.items():
+                if name and tlow in str(name).lower() and c not in selected:
+                    selected.append(c)
+
+        # 后续 series 组装用合并映射取 name，保证跨清单（l2/concept）也能正确显示名称
+        sector_map = {c: {"name": n} for c, n in merged_name.items()}
     elif method == "rank":
         # 按今日净流入倒序 —— API 只读缓存/数据库，采集由后台线程负责
         if source == "concept":

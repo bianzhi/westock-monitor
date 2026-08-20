@@ -1045,7 +1045,7 @@ export default function App() {
                         ]}
                       />
                       <Input
-                        placeholder="或输入代码（逗号分隔，如 pt01,pt02）"
+                        placeholder="或输入代码/名称（逗号分隔，如 pt02251441,CRO）"
                         value={manualCodes}
                         onChange={(e) => setManualCodes(e.target.value)}
                         style={{ width: 260 }}
