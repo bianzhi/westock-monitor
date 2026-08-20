@@ -156,6 +156,7 @@ export default function App() {
   const [manualCodes, setManualCodes] = useState("");  // 手动输入板块代码
   const [compareData, setCompareData] = useState(null);
   const [compareLoading, setCompareLoading] = useState(false);
+  const compareSeqRef = useRef(0);  // 请求序号，丢弃过期响应避免旧数据覆盖新数据
 
   // 日线图（板块日级净流入）
   const [dailyCodes, setDailyCodes] = useState("");      // 手动输入板块代码
@@ -245,15 +246,16 @@ export default function App() {
   }, [activeTab, focusEnabled]);
 
   const loadCompare = useCallback(async () => {
+    const seq = ++compareSeqRef.current;
     setCompareLoading(true);
     const method = manualCodes.trim() ? "manual" : compareMethod;
     try {
       const data = await fetchMinuteCompare(method, compareStart, compareEnd, compareSource, manualCodes.trim() || undefined);
-      setCompareData(data);
+      if (seq === compareSeqRef.current) setCompareData(data);
     } catch (e) {
-      message.error("加载分时对比失败: " + (e.response?.data?.detail || e.message));
+      if (seq === compareSeqRef.current) message.error("加载分时对比失败: " + (e.response?.data?.detail || e.message));
     } finally {
-      setCompareLoading(false);
+      if (seq === compareSeqRef.current) setCompareLoading(false);
     }
   }, [compareMethod, compareStart, compareEnd, compareSource, manualCodes]);
 

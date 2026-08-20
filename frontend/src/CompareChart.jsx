@@ -157,5 +157,5 @@ export default function CompareChart({ series = [], mode = "minute", title = "æ
     };
   }, [series, mode, title]);
 
-  return <ReactECharts option={option} style={{ height }} />;
+  return <ReactECharts option={option} notMerge={true} style={{ height }} />;
 }
