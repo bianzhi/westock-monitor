@@ -938,7 +938,7 @@ async def get_sector_detail(
     """单板块详情：近n日数据 + 强度判定"""
     storage = get_storage()
 
-    # 概念板块：读后台 concept_flow 缓存（45s 刷新），不在此同步调 CLI
+    # 概念板块：读后台 concept_flow 缓存（今日实时）+ concept_daily 落库历史，不在此同步调 CLI
     if code.startswith("pt02"):
         from concept_sectors import get_default_name
         from westock import extract_main_net_flow as _emnf
@@ -951,7 +951,27 @@ async def get_sector_detail(
         metrics = calc_sector_metrics(flow, TURNOVER_METHOD) if flow else {}
         today_turnover = metrics.get("turnover")
         today_str = date.today().isoformat()
-        records = [{"date": today_str, "net_flow": today_net, "turnover": today_turnover}]
+        today_td = date.today().strftime("%Y%m%d")
+
+        # 近 n 日记录：今日用实时 flow，历史读 concept_daily 落库表（trade_date 倒序）
+        records = [{
+            "date": today_str, "trade_date": today_td,
+            "net_flow": today_net, "turnover": today_turnover,
+            "estimated": False,
+        }]
+        cached_daily = storage.get_concept_daily_batch([code], days=n + 1).get(code, [])
+        for d in cached_daily:
+            td = d.get("trade_date")
+            if td == today_td:
+                continue  # 今日已用实时值，跳过落库里的今日重复
+            iso = f"{td[:4]}-{td[4:6]}-{td[6:8]}" if td and len(td) == 8 else td
+            records.append({
+                "date": iso, "trade_date": td,
+                "net_flow": d.get("net_flow"), "turnover": d.get("turnover"),
+                "estimated": False,
+            })
+        records = records[:n]
+
         strength = _calc_strength_from_records(records, None, n)
         history = _build_history(records, None, n)
         summary_3d = _build_summary(records, SUMMARY_3D, None)
