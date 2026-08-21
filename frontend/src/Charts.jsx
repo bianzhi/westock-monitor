@@ -131,18 +131,27 @@ export function DailyHistoryChart({ history = [] }) {
         },
       },
       legend: { data: ["净流入(亿)", "成交额(亿)"], top: 48 },
-      grid: { left: 50, right: 30, top: 90, bottom: 40 },
+      grid: { left: 50, right: 70, top: 90, bottom: 40 },
       xAxis: { type: "category", data: xs },
-      yAxis: {
-        type: "value",
-        name: "亿元",
-        // y=0 参考线：正负分界，便于识别净流入方向
-        splitLine: { lineStyle: { type: "dashed", color: "#e0e0e0" } },
-      },
+      yAxis: [
+        {
+          type: "value",
+          name: "净流入(亿)",
+          // y=0 参考线：正负分界，便于识别净流入方向
+          splitLine: { lineStyle: { type: "dashed", color: "#e0e0e0" } },
+        },
+        {
+          type: "value",
+          name: "成交额(亿)",
+          position: "right",
+          splitLine: { show: false },
+        },
+      ],
       series: [
         {
           name: "净流入(亿)",
           type: "bar",
+          yAxisIndex: 0,
           // 柱状图顶部显示日期标签（估算值），区分连续同值柱子
           label: {
             show: true,
@@ -175,6 +184,7 @@ export function DailyHistoryChart({ history = [] }) {
         {
           name: "成交额(亿)",
           type: "line",
+          yAxisIndex: 1,
           smooth: true,
           itemStyle: { color: "#f39c12" },
           data: turnover,
