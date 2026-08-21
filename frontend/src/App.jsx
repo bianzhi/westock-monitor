@@ -1123,7 +1123,13 @@ export default function App() {
                       <span>排序方式：</span>
                       <Select
                         value={compareMethod}
-                        onChange={(v) => { setCompareMethod(v); }}
+                        onChange={(v) => {
+                          setCompareMethod(v);
+                          // 排序方式联动展示指标：净额率/资金强度排序 → 图与 tooltip 展示对应指标
+                          if (v === "net_rate") setCompareMode("net_rate");
+                          else if (v === "fund_strength") setCompareMode("fund_strength");
+                          else setCompareMode("cumulative");
+                        }}
                         style={{ width: 160 }}
                         options={[
                           { value: "rank", label: "按净流入排名" },
@@ -1174,6 +1180,7 @@ export default function App() {
                           { value: "minute", label: "每分钟" },
                           { value: "cumulative", label: "累计" },
                           { value: "net_rate", label: "净额率" },
+                          { value: "fund_strength", label: "资金强度" },
                         ]}
                       />
                       <Button type="primary" icon={<ReloadOutlined />} onClick={loadCompare} loading={compareLoading}>

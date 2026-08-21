@@ -1357,7 +1357,10 @@ async def get_minute_compare(
                     rec = (daily_map.get(c) or [{}])[0]
                     net_map[c] = rec.get("net_flow")
                     turnover_map[c] = rec.get("turnover")
-                circ_mv_map = get_circ_mv_map()  # {code: circ_mv_yi(亿元)}
+                # circ_mv 统一读落库表（持久化），不依赖 data_cache 内存预热
+                _cd = storage.get_latest_sector_circ_mv()
+                for _c, _d in _cd.items():
+                    circ_mv_map[_c] = _d.get("circ_mv_yi")
             else:
                 daily_map = storage.get_sector_daily_asof(all_codes, trade_date, 1)
                 for c in all_codes:
@@ -1395,6 +1398,18 @@ async def get_minute_compare(
     # 数据库无数据时返回空，前端展示"暂无数据"——不在此调 CLI 兜底
     deltas_map = storage.get_minute_deltas_batch(selected, trade_date)
 
+    # 流通市值（亿元），用于前端展示「资金强度」曲线（净流入/流通市值）
+    # 统一读落库表 sector_circ_mv（持久化），不依赖 data_cache 内存预热（重启后为空）
+    circ_mv_series: Dict[str, Optional[float]] = {}
+    if trade_date == date.today().strftime("%Y%m%d"):
+        _cd = storage.get_latest_sector_circ_mv()
+        for _c, _d in _cd.items():
+            circ_mv_series[_c] = _d.get("circ_mv_yi")
+    else:
+        _cd = storage.get_all_sector_circ_mv(trade_date)
+        for _c, _d in _cd.items():
+            circ_mv_series[_c] = _d.get("circ_mv_yi")
+
     series = []
     for code in selected:
         deltas = deltas_map.get(code, [])
@@ -1422,6 +1437,7 @@ async def get_minute_compare(
             "name": sec.get("name", code),
             "l1": sec.get("l1"),
             "rank": start - 1 + selected.index(code) + 1,
+            "circ_mv_yi": circ_mv_series.get(code),           # 流通市值(亿元)，资金强度展示用
             "points": points,
             "point_count": len(points),
         })
