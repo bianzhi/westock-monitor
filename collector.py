@@ -570,6 +570,83 @@ def backfill_sector_daily(days: int = 10) -> Dict[str, Any]:
     }
 
 
+def backfill_sparse_sector_daily(days: int = 12) -> Dict[str, Any]:
+    """回溯补采日级记录不足的板块（稀疏板块）。
+
+    历史遗留：部分板块（如新发现的概念板块）落库记录远少于其余板块。
+    本函数找出记录天数 < days 的板块，用 westock fund_flow --date 回溯
+    补采最近 days 个交易日，upsert 按 code+trade_date 去重，幂等。
+
+    Args:
+        days: 目标补采到的交易日数（默认 12，对齐其余板块）
+
+    Returns:
+        {"sparse_codes": N, "backfilled_days": M, "total_records": K, "trade_dates": [...]}
+    """
+    from westock import fund_flow as _ff, extract_main_net_flow as _emnf
+    from westock_fund_metrics import calc_sector_metrics
+    from sectors import get_default_sector_map
+    from concept_sectors import get_default_name as _gdn
+
+    storage = get_storage()
+    sparse_codes = storage.get_sparse_sector_daily_codes(days)
+    if not sparse_codes:
+        logger.info("backfill_sparse_sector_daily: no sparse sectors (< %d days)", days)
+        return {"sparse_codes": 0, "backfilled_days": 0, "total_records": 0}
+
+    logger.info("backfill_sparse_sector_daily: %d sparse codes", len(sparse_codes))
+
+    l2_map = get_default_sector_map()
+    trading_days = get_last_n_trading_days(days, date.today())
+
+    backfilled_dates = []
+    total_records = 0
+    for td in trading_days:
+        td_str = td.strftime("%Y%m%d")
+        try:
+            flow_records = _ff(sparse_codes, raw=True, asof_date=td.isoformat())
+        except Exception as e:
+            logger.warning("backfill_sparse_sector_daily %s fund_flow failed: %s", td_str, e)
+            continue
+        if not flow_records:
+            logger.info("backfill_sparse_sector_daily %s: no data", td_str)
+            continue
+
+        records = []
+        for r in flow_records:
+            code = r.get("code") or r.get("SecuCode")
+            if not code:
+                continue
+            net = _emnf(r)
+            metrics = calc_sector_metrics(r, TURNOVER_METHOD) if r else {}
+            name = (r.get("name")
+                    or (l2_map.get(code, {}) or {}).get("name")
+                    or _gdn(code)
+                    or code)
+            records.append({
+                "code": code,
+                "name": name,
+                "trade_date": td_str,
+                "net_flow": net,
+                "turnover": metrics.get("turnover"),
+            })
+
+        if records:
+            n = storage.upsert_sector_daily_batch(records)
+            total_records += n
+            backfilled_dates.append(td_str)
+            logger.info("backfill_sparse_sector_daily %s: %d records", td_str, n)
+
+    logger.info("backfill_sparse_sector_daily: done, %d codes, %d days, %d records",
+                len(sparse_codes), len(backfilled_dates), total_records)
+    return {
+        "sparse_codes": len(sparse_codes),
+        "backfilled_days": len(backfilled_dates),
+        "total_records": total_records,
+        "trade_dates": backfilled_dates,
+    }
+
+
 def verify_daily_against_api(threshold: float = 0.2) -> Dict[str, Any]:
     """用落库的日级数据校验 westock 接口的 5D/10D 累计字段。
 
@@ -1350,6 +1427,10 @@ if __name__ == "__main__":
     elif "--test-circ-mv" in sys.argv:
         # 一次性采集全板块流通市值，写入 sector_circ_mv 缓存
         r = collect_circ_mv_snapshot()
+        print(json.dumps(r, ensure_ascii=False, indent=2, default=str))
+    elif "--backfill-sparse" in sys.argv:
+        # 回溯补采日级记录不足的板块（稀疏板块）
+        r = backfill_sparse_sector_daily()
         print(json.dumps(r, ensure_ascii=False, indent=2, default=str))
     elif "--circ-mv-loop" in sys.argv:
         # 流通市值日级采集主循环

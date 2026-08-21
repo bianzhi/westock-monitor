@@ -666,16 +666,25 @@ class Storage:
     # ============================================================
     # 数据清理
     # ============================================================
-    def cleanup_old_minute_data(self, days: int) -> int:
-        """清理 days 天前的分钟数据。
+    def cleanup_old_minute_data(self, keep_days: int) -> int:
+        """清理分钟数据，仅保留最近 keep_days 个工作日。
+
+        按交易日历（trading_calendar）计算截止日：第 keep_days 个工作日
+        及更早的分钟数据删除。与 MINUTE_CACHE_DAYS 默认 5 配合，
+        避免周末/节假日按自然天误删。
 
         Args:
-            days: 保留最近多少天
+            keep_days: 保留最近多少个工作日
 
         Returns:
             删除行数
         """
-        cutoff_date = (date.today() - timedelta(days=days)).strftime("%Y%m%d")
+        from trading_calendar import get_last_n_trading_days
+        trading_days = get_last_n_trading_days(keep_days, date.today())
+        if not trading_days:
+            return 0
+        # trading_days 倒序（最近在前），最后一个是第 keep_days 个工作日
+        cutoff_date = trading_days[-1].strftime("%Y%m%d")
         with _db_lock:
             conn = self._get_conn()
             cur = conn.cursor()
@@ -893,6 +902,26 @@ class Storage:
             conn.commit()
         logger.info("sector_daily: upserted %d records", count)
         return count
+
+    def get_sparse_sector_daily_codes(self, min_days: int) -> List[str]:
+        """查询日级记录不足 min_days 天的板块代码（用于回溯补采）。
+
+        Args:
+            min_days: 记录天数阈值，低于该值的板块视为稀疏
+
+        Returns:
+            稀疏板块代码列表
+        """
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT code FROM sector_daily
+                   GROUP BY code
+                   HAVING COUNT(DISTINCT trade_date) < ?""",
+                (min_days,),
+            )
+            return [row["code"] for row in cur.fetchall()]
 
     def get_sector_daily_batch(self, codes: List[str], days: int = 30) -> Dict[str, List[Dict]]:
         """批量获取板块近 N 交易日净流入记录（日线图数据源）。
