@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useRef, useMemo } from "react"
 import {
   Layout, Table, Button, Input, Select, Card, Row, Col, Statistic,
   message, Space, Modal, Descriptions, Spin, Tabs, Switch, InputNumber,
-  Tooltip, Badge, Drawer, DatePicker,
+  Tooltip, Badge, Drawer, DatePicker, Checkbox,
 } from "antd";
 import {
   ReloadOutlined, PlayCircleOutlined, ThunderboltOutlined,
@@ -60,6 +60,10 @@ export default function App() {
   const watchlistLoadedRef = useRef(false);
   const [watchlistUserId, setWatchlistUserId] = useState(null);
 
+  // 分时图分组（group）：勾选的板块归入「分组」，分时图只显示分组内板块。
+  // 纯前端状态，跨 l2/concept Tab 共享；空则不干预分时图原有逻辑。
+  const [groupCodes, setGroupCodes] = useState([]);
+
   const loadWatchlist = useCallback(async () => {
     try {
       const data = await fetchWatchlist();
@@ -106,6 +110,13 @@ export default function App() {
       setWatchlist(watchlist);
     }
   }, [watchlist, watchlistUserId]);
+
+  // 分时图分组切换：勾选/取消勾选某板块的「分组」标记（纯前端，跨 Tab 共享）
+  const toggleGroup = useCallback((code, checked) => {
+    setGroupCodes((prev) =>
+      checked ? [...prev, code] : prev.filter((c) => c !== code)
+    );
+  }, []);
 
   // 错误日志（开发者诊断，从主 Tab 降级到 Header 抽屉）
   const [errorLogs, setErrorLogs] = useState([]);
@@ -277,18 +288,21 @@ export default function App() {
   const loadCompare = useCallback(async () => {
     const seq = ++compareSeqRef.current;
     setCompareLoading(true);
-    const method = manualCodes.trim() ? "manual" : compareMethod;
+    // 分组非空：按分组代码加载（manual 模式，只显示分组内板块）；空则走原有逻辑
+    const hasGroup = groupCodes.length > 0;
+    const method = hasGroup ? "manual" : (manualCodes.trim() ? "manual" : compareMethod);
+    const codes = hasGroup ? groupCodes.join(",") : (manualCodes.trim() || undefined);
     try {
       // 分时接口 trade_date 期望 YYYYMMDD；selectedDate 为 YYYY-MM-DD
       const td = selectedDate ? selectedDate.replace(/-/g, "") : undefined;
-      const data = await fetchMinuteCompare(method, compareStart, compareEnd, compareSource, manualCodes.trim() || undefined, td);
+      const data = await fetchMinuteCompare(method, compareStart, compareEnd, compareSource, codes, td);
       if (seq === compareSeqRef.current) setCompareData(data);
     } catch (e) {
       if (seq === compareSeqRef.current) message.error("加载分时对比失败: " + (e.response?.data?.detail || e.message));
     } finally {
       if (seq === compareSeqRef.current) setCompareLoading(false);
     }
-  }, [compareMethod, compareStart, compareEnd, compareSource, manualCodes, selectedDate]);
+  }, [compareMethod, compareStart, compareEnd, compareSource, manualCodes, selectedDate, groupCodes]);
 
   // 筛选条件变化时自动重新加载（防抖 400ms，避免输入代码时每字符都请求）。
   // loadCompare 依赖 compareMethod/start/end/source/manualCodes，任一变化即触发；
@@ -554,6 +568,19 @@ export default function App() {
       },
     },
     {
+      title: "组",
+      key: "group",
+      fixed: "left",
+      width: 45,
+      render: (_, record) => (
+        <Checkbox
+          checked={groupCodes.includes(record.code)}
+          onChange={(e) => { toggleGroup(record.code, e.target.checked); }}
+          title="勾选加入分时图分组"
+        />
+      ),
+    },
+    {
       title: "板块名称",
       dataIndex: "name",
       key: "name",
@@ -754,7 +781,7 @@ export default function App() {
         <StrengthTag level={r.strength_level} value={r.strength_value} />
       ),
     },
-  ], [watchlist, search, toggleWatchlist, loadDetail, strengthDist, consecutiveDist, strengthFilter, consecutiveFilter]);
+  ], [watchlist, search, toggleWatchlist, loadDetail, strengthDist, consecutiveDist, strengthFilter, consecutiveFilter, groupCodes, toggleGroup]);
 
   // 行展开内容
   const expandedRowRender = (record) => (
@@ -1186,9 +1213,11 @@ export default function App() {
                   </Card>
                   <CompareChart
                     title={
-                      (manualCodes.trim()
-                        ? `板块分时对比 (指定: ${manualCodes.trim()})`
-                        : `板块分时对比 (${compareMethod === "rank" ? "净流入排名" : "编号"} ${compareStart}-${compareEnd})`) +
+                      (groupCodes.length > 0
+                        ? `板块分时对比 (分组: ${groupCodes.length} 个)`
+                        : manualCodes.trim()
+                          ? `板块分时对比 (指定: ${manualCodes.trim()})`
+                          : `板块分时对比 (${compareMethod === "rank" ? "净流入排名" : "编号"} ${compareStart}-${compareEnd})`) +
                       (selectedDate ? ` · ${selectedDate}` : " · 今日")
                     }
                     mode={compareMode}
