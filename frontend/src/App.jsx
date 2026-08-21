@@ -1186,9 +1186,10 @@ export default function App() {
                   </Card>
                   <CompareChart
                     title={
-                      manualCodes.trim()
+                      (manualCodes.trim()
                         ? `板块分时对比 (指定: ${manualCodes.trim()})`
-                        : `板块分时对比 (${compareMethod === "rank" ? "净流入排名" : "编号"} ${compareStart}-${compareEnd})`
+                        : `板块分时对比 (${compareMethod === "rank" ? "净流入排名" : "编号"} ${compareStart}-${compareEnd})`) +
+                      (selectedDate ? ` · ${selectedDate}` : " · 今日")
                     }
                     mode={compareMode}
                     series={compareData?.series || []}
