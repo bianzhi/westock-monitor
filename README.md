@@ -18,23 +18,29 @@
 
 ## ✨ 功能特性
 
-- **板块覆盖**：申万 2021 版二级行业（硬编码 134 个，支持接口刷新）
-- **资金流跟踪**：主力净流入、成交额、流通市值实时获取
+- **板块覆盖**：申万 2021 版二级行业（硬编码 134 个）+ 概念板块（722 个，源码持久化清单）
+- **资金流跟踪**：主力净流入、成交额、流通市值、涨跌幅、换手率实时获取
 - **强度判定**：5 档（强/偏强/普通/偏弱/弱），阈值按规模分档，沿用原脚本
-- **日内分钟级**：当日累计值差分得到本分钟净流入
+- **日内分钟级**：当日累计值差分得到本分钟净流入，分时对比图展示净额率
 - **n 日窗口可配**：默认 5 日，可切换 3/5/10/20
 - **跨日汇总**：近 3 日 / 近 5 日净流入与净额率
 - **可视化宽表**：板块名称 / 代码 / 流通值 / 规模 / 今日净流入 / 净额率 / 近 n 日明细 / 强度判定
-- **行展开图表**：近 n 日净流入柱状图 + 当日分钟级资金流折线
+- **行展开图表**：近 n 日净流入柱状图（双 y 轴）+ 当日分钟级资金流折线（含净额率曲线）
+- **历史回看**：板块页 / 分时页加日期选择，从本地落库表读取任意历史交易日数据
+- **分时分组**：宽表勾选「组」列，分时对比图只显示分组内板块（空则不干预原逻辑）
+- **日线图**：板块名称/代码超链接跳转对应板块日线图 / 分时图
 
 ## 🏗️ 技术架构
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                    数据采集层 (Python)                       │
-│  collector.py                                                 │
+│  collector.py（后台线程，定期/手动触发）                     │
 │  ├─ westock-data CLI (subprocess) → MainNetFlow 主力净流入  │
-│  └─ 腾讯原始 HTTP (requests) → turnover 成交额 + circ_mv   │
+│  ├─ 腾讯原始 HTTP (requests) → 板块指数涨跌幅/换手率/流通值  │
+│  ├─ collect_minute_snapshot      分钟级快照差分             │
+│  ├─ collect_sector_daily_snapshot 全板块日净流入落库        │
+│  └─ backfill_sparse_sector_daily  稀疏板块历史回溯补采      │
 │         ↓                                                     │
 │  strength.py → 5档强度判定 + 分段线性插值                   │
 └──────────────────────────┬───────────────────────────────────┘
@@ -43,23 +49,29 @@
 │                    存储层 (SQLite)                           │
 │  storage.py                                                  │
 │  ├─ sector_meta          板块元数据（代码/名称/流通市值）   │
-│  └─ minute_snapshot      分钟级快照（仅缓存最近5日）        │
-│  设计原则：日级数据不落地，实时从接口获取                   │
+│  ├─ minute_snapshot      分钟级快照（保留最近5个工作日）    │
+│  ├─ minute_delta         分钟级增量（差分结果）             │
+│  ├─ sector_daily         全板块日净流入（保留30交易日）     │
+│  ├─ concept_daily        概念板块日净流入（保留20交易日）   │
+│  └─ sector_circ_mv       流通市值/涨跌幅/换手率（按日落库）│
+│  设计原则：采集先落库，页面/API 只读库/缓存                 │
 └──────────────────────────┬───────────────────────────────────┘
                            │
 ┌──────────────────────────▼───────────────────────────────────┐
 │                    API 层 (FastAPI)                          │
 │  app.py                                                      │
-│  ├─ GET  /api/sectors          板块列表 + 强度（宽表主数据）│
+│  ├─ GET  /api/sectors          板块宽表（读 data_cache）    │
+│  ├─ GET  /api/sectors/history  历史回看宽表（读 sector_daily）│
+│  ├─ GET  /api/sectors/concept  概念板块宽表                  │
 │  ├─ GET  /api/sectors/{code}   单板块详情                   │
 │  ├─ GET  /api/sectors/{code}/minute  单板块分钟级           │
-│  ├─ GET  /api/strength/ranking 强度排行                     │
-│  └─ POST /api/refresh-sectors  手动刷新板块列表             │
+│  ├─ GET  /api/minute/compare   分时对比（支持 trade_date）  │
+│  └─ GET  /api/strength/ranking 强度排行                     │
 └──────────────────────────┬───────────────────────────────────┘
                            │
 ┌──────────────────────────▼───────────────────────────────────┐
 │                    前端 (React + ECharts + antd)            │
-│  宽表 + 行展开图表 + 顶部统计卡片                           │
+│  宽表 + 行展开图表 + 分时对比 + 日线图 + 日期选择 + 分组     │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -67,13 +79,16 @@
 
 ```
 westock-monitor/
-├── config.py              # 全局配置（n日窗口、规模分档阈值等可配项）
+├── config.py              # 全局配置（n日窗口、规模分档阈值、保留策略等可配项）
 ├── sectors.py             # 申万二级板块代码列表（134个硬编码）
+├── concept_sectors.py     # 概念板块清单（722个，源码持久化 + 发现逻辑）
 ├── westock.py             # westock-data CLI 封装（subprocess + 批量分批）
+├── westock_fund_metrics.py # 板块资金指标计算（成交额口径等）
 ├── tencent_quote.py       # 腾讯行情 HTTP 接口封装（涨跌幅/换手率/流通市值，仅补 westock 缺失字段）
 ├── strength.py            # 强度计算（5档判定 + 分段线性插值 + n日窗口可配）
-├── collector.py           # 采集层（分钟级差分 + 日级实时拉取 + 板块列表刷新）
-├── storage.py             # 存储层（SQLite + 仅缓存最近5日分钟数据）
+├── trading_calendar.py    # A股交易日历（Tushare 优先，缓存兜底）
+├── collector.py           # 采集层（分钟差分 + 日级落库 + 板块刷新 + 稀疏补采）
+├── storage.py             # 存储层（SQLite，分钟保留5工作日 + 日级保留30交易日）
 ├── app.py                 # FastAPI 后端
 ├── requirements.txt       # Python 依赖
 ├── start.sh               # 一键启动脚本 (macOS)
@@ -86,8 +101,12 @@ westock-monitor/
     ├── index.html
     └── src/
         ├── main.jsx
-        ├── App.jsx        # 主应用（宽表 + 行展开）
-        ├── Charts.jsx     # ECharts 图表组件
+        ├── App.jsx        # 主应用（宽表 + 日期选择 + 分组 + 分时对比）
+        ├── Charts.jsx     # ECharts 图表组件（分时/日线/净额率）
+        ├── CompareChart.jsx # 分时对比图
+        ├── DailyChart.jsx   # 板块日线图
+        ├── SectorDetail.jsx # 行展开详情（近n日 + 分钟图）
+        ├── L1Tab.jsx        # 一级行业 Tab
         ├── ui.jsx         # 强度档位标签等 UI 组件
         ├── api.js         # axios API 封装
         └── index.css
@@ -196,7 +215,7 @@ n 可在界面右上角切换（3 / 5 / 10 / 20）。
 | `SUMMARY_3D` | 3 | 近3日汇总窗口 |
 | `SUMMARY_5D` | 5 | 近5日汇总窗口 |
 | `MINUTE_INTERVAL` | 60 | 分钟级采集间隔(秒) |
-| `MINUTE_CACHE_DAYS` | 5 | 分钟级数据缓存天数 |
+| `MINUTE_CACHE_DAYS` | 5 | 分钟级数据保留最近几个工作日 |
 | `WESTOCK_BATCH_SIZE` | 20 | westock-data 批量查询每批数量 |
 | `WESTOCK_WORKERS` | 8 | westock-data 并发线程数 |
 | `TENCENT_WORKERS` | 8 | 腾讯HTTP接口并发数 |
@@ -252,8 +271,14 @@ export MINUTE_INTERVAL=30
 | GET | `/api/config` | 当前配置 |
 | GET | `/api/sectors/{code}` | 单板块详情 |
 | GET | `/api/sectors/{code}/minute` | 单板块当日分钟级数据 |
+| GET | `/api/sectors/history?date=` | 历史回看宽表（读 sector_daily） |
+| GET | `/api/sectors/concept` | 概念板块宽表 |
+| GET | `/api/sectors/concept/history?date=` | 概念板块历史宽表 |
+| GET | `/api/sectors/l1-summary` | 一级行业汇总 |
+| GET | `/api/minute/compare` | 分时对比（支持 trade_date） |
 | GET | `/api/strength/ranking` | 强度排行 |
 | POST | `/api/refresh-sectors` | 手动刷新板块列表 |
+| POST | `/api/refresh-concepts` | 手动刷新概念板块 |
 | POST | `/api/collect/minute` | 手动触发一次分钟采集 |
 
 完整接口文档：http://localhost:8200/docs
@@ -295,8 +320,9 @@ python collector.py --test-daily
    本项目通过腾讯原始 HTTP 接口（`proxy.finance.qq.com`）补充。
 4. **交易日历**：仅判断 A 股交易时段（9:30-11:30, 13:00-15:00），
    非交易时段采集循环空转。
-5. **历史数据**：近 n 日历史中 T-1 及更早日为**估算值**
-   （基于 `MainNetFlow5D/10D/20D` 累计差分），前端会标注 `estimated: true`。
+5. **历史数据**：板块日级历史数据每日收盘后落库到 `sector_daily`/`concept_daily`
+   （保留 30/20 交易日），历史回看与日线图直接读库；未落库的早期日期才用
+   `MainNetFlow5D/10D/20D` 累计差分估算，前端会标注 `estimated: true`。
 
 ## 📝 License
 
