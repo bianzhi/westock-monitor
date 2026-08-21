@@ -152,32 +152,8 @@ export function DailyHistoryChart({ history = [] }) {
           name: "净流入(亿)",
           type: "bar",
           yAxisIndex: 0,
-          // 柱状图顶部显示日期标签（估算值），区分连续同值柱子
-          label: {
-            show: true,
-            position: "top",
-            fontSize: 10,
-            color: "#999",
-            formatter: (params) => {
-              const est = estimated[params.dataIndex];
-              return est ? xs[params.dataIndex] : "";
-            },
-          },
-          // y=0 参考线
-          markLine: {
-            silent: true,
-            symbol: "none",
-            lineStyle: { type: "solid", color: "#aaa", width: 1 },
-            data: [{ yAxis: 0 }],
-          },
           itemStyle: {
             color: (params) => (params.value >= 0 ? "#e74c3c" : "#2ecc71"),
-            borderColor: (params) =>
-              estimated[params.dataIndex] ? "#333" : "transparent",
-            borderWidth: (params) =>
-              estimated[params.dataIndex] ? 1 : 0,
-            borderType: (params) =>
-              estimated[params.dataIndex] ? "dashed" : "solid",
           },
           data: net,
         },
