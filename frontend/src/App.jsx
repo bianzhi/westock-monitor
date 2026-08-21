@@ -21,7 +21,7 @@ import L1Tab from "./L1Tab";
 import CompareChart from "./CompareChart";
 import DailyChart from "./DailyChart";
 import AlertsTab from "./AlertsTab";
-import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect, fetchUserPrefs, saveUserPrefs, fetchConceptSectors, fetchErrors, fetchWatchlist, addWatchlist, removeWatchlist, refreshConcepts, fetchSectorDailyHistory } from "./api";
+import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect, fetchUserPrefs, saveUserPrefs, fetchConceptSectors, fetchConceptSectorsHistory, fetchSectorsHistory, fetchErrors, fetchWatchlist, addWatchlist, removeWatchlist, refreshConcepts, fetchSectorDailyHistory } from "./api";
 import AuthGuard from "./components/AuthGuard";
 
 const { Header, Content, Footer } = Layout;
