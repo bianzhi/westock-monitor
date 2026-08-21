@@ -1312,20 +1312,30 @@ async def get_minute_compare(
         # 后续 series 组装用合并映射取 name，保证跨清单（l2/concept）也能正确显示名称
         sector_map = {c: {"name": n} for c, n in merged_name.items()}
     elif method == "rank":
-        # 按今日净流入倒序 —— API 只读缓存/数据库，采集由后台线程负责
-        if source == "concept":
-            # 读后台 concept_flow 缓存（45s 刷新），不在此同步调 CLI
-            with _concept_flow_lock:
-                flow_map = _concept_flow_cache.get("flow_map", {})
-            def _sf(v):
-                if v is None or v == "": return None
-                try: return float(v)
-                except (TypeError, ValueError): return None
-            ranked = [(c, _sf(flow_map.get(c, {}).get("MainNetFlow")) or 0) for c in all_codes]
+        # 按净流入倒序取区间。
+        # 今日：读实时缓存；历史日期：读落库表当日净流入，保证 top N 板块随日期变动。
+        today_td = date.today().strftime("%Y%m%d")
+        if trade_date == today_td:
+            if source == "concept":
+                # 读后台 concept_flow 缓存（45s 刷新），不在此同步调 CLI
+                with _concept_flow_lock:
+                    flow_map = _concept_flow_cache.get("flow_map", {})
+                def _sf(v):
+                    if v is None or v == "": return None
+                    try: return float(v)
+                    except (TypeError, ValueError): return None
+                ranked = [(c, _sf(flow_map.get(c, {}).get("MainNetFlow")) or 0) for c in all_codes]
+            else:
+                # 读 data_cache 日级数据；缓存未就绪时用 0 值（采集线程会填）
+                daily_map = get_daily_map()
+                ranked = [(c, (daily_map.get(c, [{}])[0].get("net_flow") or 0)) for c in all_codes]
         else:
-            # 读 data_cache 日级数据；缓存未就绪时用 0 值（采集线程会填）
-            daily_map = get_daily_map()
-            ranked = [(c, (daily_map.get(c, [{}])[0].get("net_flow") or 0)) for c in all_codes]
+            # 历史日期：读落库表当日净流入（asof 取最近交易日，即所选交易日当天）
+            if source == "concept":
+                daily_map = storage.get_concept_daily_asof(all_codes, trade_date, 1)
+            else:
+                daily_map = storage.get_sector_daily_asof(all_codes, trade_date, 1)
+            ranked = [(c, ((daily_map.get(c) or [{}])[0].get("net_flow") or 0)) for c in all_codes]
         ranked.sort(key=lambda x: x[1], reverse=True)
         ordered_codes = [c for c, _ in ranked]
         selected = ordered_codes[start - 1:end]
