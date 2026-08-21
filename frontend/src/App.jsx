@@ -199,6 +199,15 @@ export default function App() {
     }
   }, [dailyDays]);
 
+  // 跳转到某板块的分时图：设代码 + 来源 → 切分时对比 Tab（loadCompare 的 useEffect
+  // 会因 manualCodes/source 变化自动重新加载，manual 模式只显示该板块）
+  const gotoMinute = useCallback((code) => {
+    if (!code) return;
+    setManualCodes(code);
+    setCompareSource(code.startsWith("pt02") ? "concept" : "l2");
+    setActiveTab("compare");
+  }, []);
+
   // 高频模式
   const [focusEnabled, setFocusEnabled] = useState(false);
   const autoRefreshRef = useRef(null);
@@ -542,7 +551,16 @@ export default function App() {
         return (rec.name || "").toLowerCase().includes(v) || (rec.code || "").toLowerCase().includes(v);
       },
     },
-    { title: "代码", dataIndex: "code", key: "code", width: 110, sorter: (a, b) => (a.code || "").localeCompare(b.code || "") },
+    {
+      title: "代码",
+      dataIndex: "code",
+      key: "code",
+      width: 110,
+      sorter: (a, b) => (a.code || "").localeCompare(b.code || ""),
+      render: (text, record) => (
+        <a onClick={() => gotoMinute(record.code)} title="查看分时图">{text}</a>
+      ),
+    },
     {
       title: "流通值(亿)",
       dataIndex: "circ_mv_yi",
