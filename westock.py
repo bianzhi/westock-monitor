@@ -229,12 +229,16 @@ def sector_ranking(raw: bool = True) -> Dict:
     return {"sections": []}
 
 
-def search_sector(keyword: str, raw: bool = True) -> List[Dict]:
+def search_sector(keyword: str, raw: bool = True, limit: Optional[int] = None) -> List[Dict]:
     """按关键词搜板块（用于刷新板块列表）。
 
-    返回含 code/name/分类 的列表
+    返回含 code/name/分类 的列表。
+    limit 为返回条数上限（不传则用 CLI 默认，通常仅 10 条）。
     """
-    data = westock("search", keyword, "--type", "sector", raw=raw)
+    args = ["search", keyword, "--type", "sector"]
+    if limit is not None:
+        args.extend(["--limit", str(limit)])
+    data = westock(*args, raw=raw)
     if isinstance(data, list):
         return data
     return []

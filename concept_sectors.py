@@ -644,6 +644,101 @@ VERIFIED_CONCEPTS: Dict[str, str] = {
     "pt02GN2444": "氦气",
     "pt02GN2445": "超节点",
     "pt02GN2446": "打印机",
+    "pt02000019": "足球概念",
+    "pt02002486": "文化传媒概念",
+    "pt02003960": "无线充电",
+    "pt02003990": "快递物流",
+    "pt02010005": "光伏概念",
+    "pt02011037": "靶材",
+    "pt02011388": "电子烟",
+    "pt02011412": "BIPV概念(光伏建筑一体化)",
+    "pt02011424": "储能概念",
+    "pt02011432": "农药概念",
+    "pt02011433": "兽药",
+    "pt02011437": "绿色电力",
+    "pt02031027": "MSCI概念",
+    "pt02031034": "养老金持股",
+    "pt02031317": "上证50",
+    "pt02041006": "血液制品概念",
+    "pt02041272": "工业互联网",
+    "pt02041299": "电力物联网",
+    "pt02051360": "RCS富媒体通信",
+    "pt02051365": "有色金属概念",
+    "pt02060004": "节能照明",
+    "pt02060006": "汽车电子概念",
+    "pt02061045": "石墨电极",
+    "pt02061047": "小米概念",
+    "pt02061271": "富士康概念",
+    "pt02061273": "独角兽概念",
+    "pt02061277": "数字中国",
+    "pt02061315": "磷化工",
+    "pt02061321": "数字货币",
+    "pt02061361": "纺织服装概念",
+    "pt02061368": "化妆品概念",
+    "pt02061408": "PVC",
+    "pt02061410": "PTA",
+    "pt02061431": "元宇宙",
+    "pt02070004": "电子发票",
+    "pt02070005": "跨境电商概念",
+    "pt02070006": "冷链物流",
+    "pt02070007": "物流电商平台",
+    "pt02071024": "新零售",
+    "pt02071359": "C2M概念",
+    "pt02071377": "免税店概念",
+    "pt02071380": "地摊经济",
+    "pt02080001": "水泥概念",
+    "pt02080002": "玻璃概念",
+    "pt02081275": "宁德时代概念",
+    "pt02081355": "家居概念",
+    "pt02090002": "波罗的海干散货指数(BDI)",
+    "pt02091353": "航运概念",
+    "pt02100015": "集成电路概念",
+    "pt02101370": "造纸概念",
+    "pt02101374": "包装印刷概念",
+    "pt02101375": "轮胎概念",
+    "pt02101379": "碳基半导体",
+    "pt02101382": "EDA设计软件",
+    "pt02101383": "汽车整车概念",
+    "pt02101385": "中芯国际概念",
+    "pt02101396": "第三代半导体",
+    "pt02101399": "快充概念",
+    "pt02101400": "蔚来汽车概念",
+    "pt02101439": "IGBT",
+    "pt02110006": "智能医疗",
+    "pt02111040": "智能音箱",
+    "pt02111041": "智能交通",
+    "pt02111300": "数字孪生",
+    "pt02111314": "ETC",
+    "pt02111367": "REITs",
+    "pt02111369": "港口概念",
+    "pt02111372": "工程机械概念",
+    "pt02111373": "电梯概念",
+    "pt02120001": "家用电器概念",
+    "pt02121348": "旅游概念",
+    "pt02121422": "宠物经济",
+    "pt02130002": "职业教育",
+    "pt02140001": "供应链金融",
+    "pt02150001": "新疆振兴",
+    "pt02170004": "生物质能",
+    "pt02171303": "氢能源",
+    "pt02191421": "三胎概念",
+    "pt02200001": "农村电商",
+    "pt02220002": "电子竞技",
+    "pt02221279": "马彩概念",
+    "pt02231340": "医疗信息化",
+    "pt02251286": "疫苗检测溯源",
+    "pt02252001": "新冠检测",
+    "pt02270002": "特钢概念",
+    "pt02281404": "RCEP概念",
+    "pt02311023": "房地产开发概念",
+    "pt02B10003": "蚂蚁金服概念",
+    "pt02B20001": "白酒概念",
+    "pt02B20002": "期货概念",
+    "pt02B70001": "电力改革",
+    "pt02C10003": "风电概念",
+    "pt02D70001": "O2O概念",
+    "pt02GN0004": "肝炎概念",
+    "pt02GN0227": "恒大集团概念",
 }
 
 
@@ -716,8 +811,10 @@ def search_and_merge_concepts(keyword: str, dry_run: bool = False) -> Dict[str, 
     before = len(get_concept_sectors())
     added: List[Dict[str, str]] = []
     for r in results:
-        # 仅接受分类含"概念"的条目，避免误把二级行业混进来
-        if "概念" not in (r.get("分类") or ""):
+        # 仅接受分类含"概念"且非"地域"的条目：避免误把二级行业混进来，
+        # 也排除"新疆/西藏"这类地域板块（聚源地域概念清单，pt03 前缀）
+        cat = r.get("分类") or ""
+        if "概念" not in cat or "地域" in cat:
             continue
         code = r.get("code") or r.get("SecuCode")
         name = r.get("name") or r.get("Name") or ""
@@ -729,6 +826,81 @@ def search_and_merge_concepts(keyword: str, dry_run: bool = False) -> Dict[str, 
             else:
                 if add_concept(code, name):
                     added.append({"code": code, "name": name})
+    return {
+        "added": added,
+        "total_before": before,
+        "total_after": len(get_concept_sectors()) if not dry_run else before + len(added),
+    }
+
+
+# 概念板块发现关键词集合：
+#   - 高频中文词：覆盖"XX概念""XX产业"类板块
+#   - 单字符 a-z / 0-9：覆盖纯英文缩写板块（MLCC/CRO/AIGC/IGBT…，名称不含中文）
+# westock search --type sector 只按名称关键词匹配，无法空关键词全量枚举，
+# 故用「中文高频词 + 单字符枚举」批量反查，合并去重后补全。
+DISCOVERY_KEYWORDS = [
+    "概念", "产业", "科技", "新", "芯", "电", "能", "材", "医", "药",
+    "汽车", "机器人", "人工智能", "算力", "半导体", "光伏", "储能",
+    "数据", "数字", "经济", "军工", "新能源", "芯片", "氢能", "ChatGPT",
+    "AI", "电池", "互联网", "通信", "消费", "金融", "地产", "钢铁",
+    "有色", "化工", "农业", "环保", "教育", "游戏", "传媒", "旅游",
+    "物流", "港口", "航运", "航空", "军工", "核电", "风电", "水利",
+    "养老", "医疗", "生物", "疫苗", "基因", "脑机", "元宇宙", "区块链",
+] + list("abcdefghijklmnopqrstuvwxyz") + list("0123456789")
+
+
+def discover_concepts(keywords: List[str] = None, dry_run: bool = False) -> Dict[str, Any]:
+    """批量关键词搜索，全量发现概念板块并补全白名单。
+
+    概念板块清单是静态快照 + 关键词反查补全，覆盖不全（如 MLCC 这类纯英文
+    缩写板块漏掉）。本函数用一批关键词（中文高频词 + 单字符枚举）批量反查，
+    合并去重、过滤分类含"概念"，把漏板补进缓存。
+
+    Args:
+        keywords: 自定义关键词列表，None 时用内置 DISCOVERY_KEYWORDS
+        dry_run: True 时不写缓存，只返回候选
+
+    Returns:
+        {"added": [{code, name}, ...], "total_before": N, "total_after": M}
+    """
+    from westock import search_sector
+
+    kws = keywords if keywords is not None else DISCOVERY_KEYWORDS
+    before = len(get_concept_sectors())
+    existing = get_concept_sectors()
+
+    discovered: Dict[str, str] = {}
+    for kw in kws:
+        try:
+            results = search_sector(kw, raw=True, limit=2000) or []
+        except Exception as e:
+            logger.warning("discover_concepts search %r failed: %s", kw, e)
+            continue
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            # 仅接受分类含"概念"且非"地域"的条目
+            cat = r.get("分类") or ""
+            if "概念" not in cat or "地域" in cat:
+                continue
+            code = r.get("code") or r.get("SecuCode")
+            name = r.get("name") or r.get("Name") or ""
+            if code and name and code not in existing:
+                discovered[code] = name
+
+    added: List[Dict[str, str]] = []
+    if not dry_run:
+        merged = dict(existing)
+        for code, name in discovered.items():
+            merged[code] = name
+            added.append({"code": code, "name": name})
+        if merged != existing:
+            save_concept_sectors(merged)
+    else:
+        added = [{"code": c, "name": n} for c, n in discovered.items()]
+
+    logger.info("discover_concepts: keywords=%d, discovered=%d, added=%d",
+                len(kws), len(discovered), len(added))
     return {
         "added": added,
         "total_before": before,
