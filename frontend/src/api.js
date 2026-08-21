@@ -45,6 +45,12 @@ export const fetchL1Summary = (n) =>
 export const fetchConceptSectors = (n) =>
   api.get("/sectors/concept", { params: { n } }).then((r) => r.data);
 
+export const fetchSectorsHistory = (date, n) =>
+  api.get("/sectors/history", { params: { date, n } }).then((r) => r.data);
+
+export const fetchConceptSectorsHistory = (date, n) =>
+  api.get("/sectors/concept/history", { params: { date, n } }).then((r) => r.data);
+
 export const fetchSectorDailyHistory = (codes, days = 30) =>
   api
     .get("/sector-daily-history", { params: { codes, days } })

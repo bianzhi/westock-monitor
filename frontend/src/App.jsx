@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useRef, useMemo } from "react"
 import {
   Layout, Table, Button, Input, Select, Card, Row, Col, Statistic,
   message, Space, Modal, Descriptions, Spin, Tabs, Switch, InputNumber,
-  Tooltip, Badge, Drawer,
+  Tooltip, Badge, Drawer, DatePicker,
 } from "antd";
 import {
   ReloadOutlined, PlayCircleOutlined, ThunderboltOutlined,
@@ -31,6 +31,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [health, setHealth] = useState(null);
   const [n, setN] = useState(5);
+  const [selectedDate, setSelectedDate] = useState(null);  // null=今日；否则 YYYY-MM-DD 看历史
   const [search, setSearch] = useState("");
   const [detailCode, setDetailCode] = useState(null);
   const [detailData, setDetailData] = useState(null);
@@ -128,7 +129,9 @@ export default function App() {
     const MAX_RETRIES = 5;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const data = await fetchConceptSectors(n);
+        const data = selectedDate
+          ? await fetchConceptSectorsHistory(selectedDate, n)
+          : await fetchConceptSectors(n);
         setConceptSectors(data.sectors || []);
         setConceptLoading(false);
         return;
@@ -145,7 +148,7 @@ export default function App() {
       }
     }
     setConceptLoading(false);
-  }, [n]);
+  }, [n, selectedDate]);
 
   // 分时对比页
   const [compareMethod, setCompareMethod] = useState("rank");
@@ -276,14 +279,16 @@ export default function App() {
     setCompareLoading(true);
     const method = manualCodes.trim() ? "manual" : compareMethod;
     try {
-      const data = await fetchMinuteCompare(method, compareStart, compareEnd, compareSource, manualCodes.trim() || undefined);
+      // 分时接口 trade_date 期望 YYYYMMDD；selectedDate 为 YYYY-MM-DD
+      const td = selectedDate ? selectedDate.replace(/-/g, "") : undefined;
+      const data = await fetchMinuteCompare(method, compareStart, compareEnd, compareSource, manualCodes.trim() || undefined, td);
       if (seq === compareSeqRef.current) setCompareData(data);
     } catch (e) {
       if (seq === compareSeqRef.current) message.error("加载分时对比失败: " + (e.response?.data?.detail || e.message));
     } finally {
       if (seq === compareSeqRef.current) setCompareLoading(false);
     }
-  }, [compareMethod, compareStart, compareEnd, compareSource, manualCodes]);
+  }, [compareMethod, compareStart, compareEnd, compareSource, manualCodes, selectedDate]);
 
   // 筛选条件变化时自动重新加载（防抖 400ms，避免输入代码时每字符都请求）。
   // loadCompare 依赖 compareMethod/start/end/source/manualCodes，任一变化即触发；
@@ -307,6 +312,19 @@ export default function App() {
   // silent=true 时（后台自动刷新/dirty-flag）不弹消息，只在首次/手动刷新时提示
   const loadSectors = useCallback(async (forceRefresh = false, silent = false) => {
     setLoading(true);
+    // 历史日期：读落库历史接口（不支持 forceRefresh）
+    if (selectedDate && !forceRefresh) {
+      try {
+        const data = await fetchSectorsHistory(selectedDate, n);
+        setSectors(data.sectors || []);
+        setLastUpdate(data.last_update || "");
+        if (!silent) message.success(`已加载 ${data.total} 个板块（${selectedDate}）`);
+      } catch (e) {
+        message.error("加载历史板块失败: " + (e.response?.data?.detail || e.message));
+      }
+      setLoading(false);
+      return;
+    }
     const MAX_RETRIES = forceRefresh ? 1 : 20;  // 强制刷新时只试 1 次（后端同步等待）
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
@@ -336,7 +354,7 @@ export default function App() {
       }
     }
     setLoading(false);
-  }, [n]);
+  }, [n, selectedDate]);
 
   // 健康检查 + 盘中宽表 dirty-flag 自动刷新
   // 后台每 60s 刷一次缓存（data_cache），前端 30s 轮询 health 拿 cache_updated；
@@ -975,6 +993,13 @@ export default function App() {
 
                   <Card title="板块强度宽表" style={{ marginBottom: 16 }}>
                     <Space style={{ marginBottom: 12 }} wrap>
+                      <DatePicker
+                        value={selectedDate ? dayjs(selectedDate) : null}
+                        onChange={(d) => { setSelectedDate(d ? d.format("YYYY-MM-DD") : null); }}
+                        placeholder="选择日期（默认今日）"
+                        allowClear
+                        style={{ width: 180 }}
+                      />
                       <Input.Search
                         placeholder="搜索板块名称/代码（实时筛选）"
                         allowClear
@@ -1061,6 +1086,13 @@ export default function App() {
                 <>
                   <Card size="small" style={{ marginBottom: 12 }}>
                     <Space>
+                      <DatePicker
+                        value={selectedDate ? dayjs(selectedDate) : null}
+                        onChange={(d) => { setSelectedDate(d ? d.format("YYYY-MM-DD") : null); }}
+                        placeholder="选择日期（默认今日）"
+                        allowClear
+                        style={{ width: 180 }}
+                      />
                       <span>排序方式：</span>
                       <Select
                         value={compareMethod}
@@ -1171,6 +1203,13 @@ export default function App() {
               children: (
                 <Card title="概念板块宽表" style={{ marginBottom: 16 }}>
                   <Space style={{ marginBottom: 12 }} wrap>
+                    <DatePicker
+                      value={selectedDate ? dayjs(selectedDate) : null}
+                      onChange={(d) => { setSelectedDate(d ? d.format("YYYY-MM-DD") : null); }}
+                      placeholder="选择日期（默认今日）"
+                      allowClear
+                      style={{ width: 180 }}
+                    />
                     <Input.Search
                       placeholder="搜索概念板块名称/代码（实时筛选）"
                       allowClear

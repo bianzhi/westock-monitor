@@ -829,6 +829,37 @@ class Storage:
             logger.info("concept_daily: cleaned %d old records", deleted)
         return deleted
 
+    def get_concept_daily_asof(self, codes: List[str], asof_date: str, days: int = 20) -> Dict[str, List[Dict]]:
+        """获取概念板块截至指定交易日的近 N 交易日记录（历史回看数据源）。
+
+        Args:
+            codes: 板块代码列表
+            asof_date: 截止交易日 YYYYMMDD（含）
+            days: 往回取的天数
+
+        Returns:
+            {code: [{trade_date, net_flow, turnover}, ...]}（trade_date 倒序，截至 asof_date）
+        """
+        if not codes:
+            return {}
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            placeholders = ",".join("?" * len(codes))
+            cur.execute(
+                f"""SELECT code, name, trade_date, net_flow, turnover
+                    FROM concept_daily
+                    WHERE code IN ({placeholders}) AND trade_date <= ?
+                    ORDER BY trade_date DESC
+                    LIMIT ?""",
+                codes + [asof_date, days * len(codes)],
+            )
+            result: Dict[str, List[Dict]] = {c: [] for c in codes}
+            for row in cur.fetchall():
+                d = dict(row)
+                result[d["code"]].append(d)
+            return result
+
     # ============================================================
     # 全板块日级净流入（sector_daily，日线图数据源，保留近 30 交易日）
     # ============================================================

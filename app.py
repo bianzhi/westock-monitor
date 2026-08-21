@@ -930,6 +930,93 @@ async def get_l1_summary(
     )
 
 
+@app.get("/api/sectors/history", response_model=SectorListResponse)
+async def get_sectors_history(
+    date: str = Query(..., description="YYYY-MM-DD，查询日期"),
+    n: int = Query(STRENGTH_WINDOW_N, description="强度判定窗口"),
+):
+    """历史回看：查询指定日期的板块强度宽表。
+
+    从 sector_daily 落库表读取（采集后台线程收盘后已写入），
+    不在请求路径上同步调 CLI。库中无该日期数据时返回空列表。
+
+    注意：本路由必须先于 /api/sectors/{code} 注册，否则 "history" 会被
+    当作 code 参数被 {code} 路由拦截。
+    """
+    storage = get_storage()
+    _ensure_meta()
+    sector_list = load_sectors()
+    meta_map = {m["code"]: m for m in storage.get_all_sector_meta()}
+
+    if not sector_list:
+        raise HTTPException(status_code=500, detail="no sector data")
+
+    # date(YYYY-MM-DD) → YYYYMMDD
+    try:
+        asof_td = datetime.strptime(date, "%Y-%m-%d").strftime("%Y%m%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid date format, expect YYYY-MM-DD")
+
+    codes = [sec["code"] for sec in sector_list]
+    db_map = storage.get_sector_daily_asof(codes, asof_td, n)
+
+    rows: List[SectorRow] = []
+
+    for sec in sector_list:
+        code = sec["code"]
+        db_records = db_map.get(code, [])
+        # 落库记录缺 date(ISO) 字段，补上；保持 trade_date 倒序（最近在前）
+        records = []
+        for d in db_records[:n]:
+            td = d.get("trade_date")
+            records.append({
+                "date": f"{td[:4]}-{td[4:6]}-{td[6:8]}" if td and len(td) == 8 else td,
+                "trade_date": td,
+                "net_flow": d.get("net_flow"),
+                "turnover": d.get("turnover"),
+                "estimated": False,
+            })
+        meta = meta_map.get(code, {})
+
+        today_rec = records[0] if records else {}
+        today_net = today_rec.get("net_flow")
+        today_turnover = today_rec.get("turnover")
+
+        circ_mv_yi = meta.get("circ_mv_yi")
+        scale = get_scale(circ_mv_yi) if circ_mv_yi else (meta.get("scale") or "小盘")
+
+        history = _build_history(records, None, n)
+        summary_3d = _build_summary(records, SUMMARY_3D, circ_mv_yi)
+        summary_5d = _build_summary(records, SUMMARY_5D, circ_mv_yi)
+        strength = _calc_strength_from_records(records, circ_mv_yi, n)
+
+        rows.append(SectorRow(
+            code=code,
+            name=sec.get("name") or meta.get("name", ""),
+            l1=sec.get("l1") or meta.get("l1"),
+            circ_mv_yi=circ_mv_yi,
+            scale=scale,
+            today_net_flow_yi=_to_yi(today_net),
+            today_turnover_yi=_to_yi(today_turnover),
+            today_net_rate=_net_rate(today_net, today_turnover),
+            history=history,
+            summary_3d=summary_3d,
+            summary_5d=summary_5d,
+            strength_value=strength["value"],
+            strength_level=strength["level"],
+        ))
+
+    rows.sort(key=lambda r: r.strength_value, reverse=True)
+
+    return SectorListResponse(
+        date=date,
+        last_update=datetime.now().isoformat(),
+        n_window=n,
+        sectors=rows,
+        total=len(rows),
+    )
+
+
 @app.get("/api/sectors/{code}")
 async def get_sector_detail(
     code: str,
@@ -1455,42 +1542,37 @@ async def get_strength_ranking(
     )
 
 
-# ============================================================
-# 历史回看
-# ============================================================
-@app.get("/api/sectors/history", response_model=SectorListResponse)
-async def get_sectors_history(
+@app.get("/api/sectors/concept/history", response_model=SectorListResponse)
+async def get_concept_sectors_history(
     date: str = Query(..., description="YYYY-MM-DD，查询日期"),
     n: int = Query(STRENGTH_WINDOW_N, description="强度判定窗口"),
 ):
-    """历史回看：查询指定日期的板块强度宽表。
+    """概念板块历史宽表：读 concept_daily + sector_circ_mv 落库表。
 
-    从 sector_daily 落库表读取（采集后台线程收盘后已写入），
-    不在请求路径上同步调 CLI。库中无该日期数据时返回空列表。
+    不在请求路径同步调 CLI；库中无该日期数据时返回空列表。
     """
     storage = get_storage()
-    _ensure_meta()
-    sector_list = load_sectors()
-    meta_map = {m["code"]: m for m in storage.get_all_sector_meta()}
+    from concept_sectors import get_default_codes, get_default_name
 
-    if not sector_list:
-        raise HTTPException(status_code=500, detail="no sector data")
+    codes = get_default_codes()
+    if not codes:
+        return SectorListResponse(
+            date=date, last_update="", n_window=n, sectors=[], total=0,
+        )
 
-    # date(YYYY-MM-DD) → YYYYMMDD
     try:
         asof_td = datetime.strptime(date, "%Y-%m-%d").strftime("%Y%m%d")
     except ValueError:
         raise HTTPException(status_code=400, detail="invalid date format, expect YYYY-MM-DD")
 
-    codes = [sec["code"] for sec in sector_list]
-    db_map = storage.get_sector_daily_asof(codes, asof_td, n)
+    # 读 concept_daily 落库（近 n 日，截至 asof）用于净流入/强度/连续流入
+    daily_map = storage.get_concept_daily_asof(codes, asof_td, n + 1)
+    # 读 sector_circ_mv 落库（涨跌幅/换手率/流通市值，按 asof 当日）
+    circ_mv_detail = storage.get_all_sector_circ_mv(asof_td)
 
     rows: List[SectorRow] = []
-
-    for sec in sector_list:
-        code = sec["code"]
-        db_records = db_map.get(code, [])
-        # 落库记录缺 date(ISO) 字段，补上；保持 trade_date 倒序（最近在前）
+    for code in codes:
+        db_records = daily_map.get(code, [])
         records = []
         for d in db_records[:n]:
             td = d.get("trade_date")
@@ -1501,38 +1583,53 @@ async def get_sectors_history(
                 "turnover": d.get("turnover"),
                 "estimated": False,
             })
-        meta = meta_map.get(code, {})
 
         today_rec = records[0] if records else {}
         today_net = today_rec.get("net_flow")
         today_turnover = today_rec.get("turnover")
 
-        circ_mv_yi = meta.get("circ_mv_yi")
-        scale = get_scale(circ_mv_yi) if circ_mv_yi else (meta.get("scale") or "小盘")
+        circ_detail = circ_mv_detail.get(code, {})
+        c_mv_yi = circ_detail.get("circ_mv_yi")
+        c_change_pct = circ_detail.get("change_pct")
+        c_turnover = circ_detail.get("turnover_rate")
+        c_scale = get_scale(c_mv_yi) if c_mv_yi else "小盘"
 
-        history = _build_history(records, None, n)
-        summary_3d = _build_summary(records, SUMMARY_3D, circ_mv_yi)
-        summary_5d = _build_summary(records, SUMMARY_5D, circ_mv_yi)
-        strength = _calc_strength_from_records(records, circ_mv_yi, n)
+        c_fund_strength = None
+        if today_net is not None and c_mv_yi and c_mv_yi > 0:
+            c_fund_strength = round(today_net / (c_mv_yi * 1e8) * 100, 4)
+
+        c_consecutive = 0
+        for _r in records:
+            _nf = _r.get("net_flow")
+            if _nf is not None and _nf > 0:
+                c_consecutive += 1
+            else:
+                break
+
+        c_divergence = (today_net is not None and today_net > 0
+                        and c_change_pct is not None and c_change_pct < 0)
+
+        strength = _calc_strength_from_records(records[:n], c_mv_yi, n)
+        summary_3d = _build_summary(records[:SUMMARY_3D], SUMMARY_3D, c_mv_yi)
+        summary_5d = _build_summary(records[:SUMMARY_5D], SUMMARY_5D, c_mv_yi)
 
         rows.append(SectorRow(
-            code=code,
-            name=sec.get("name") or meta.get("name", ""),
-            l1=sec.get("l1") or meta.get("l1"),
-            circ_mv_yi=circ_mv_yi,
-            scale=scale,
+            code=code, name=get_default_name(code),
+            l1="概念", circ_mv_yi=c_mv_yi, scale=c_scale,
             today_net_flow_yi=_to_yi(today_net),
             today_turnover_yi=_to_yi(today_turnover),
             today_net_rate=_net_rate(today_net, today_turnover),
-            history=history,
-            summary_3d=summary_3d,
-            summary_5d=summary_5d,
-            strength_value=strength["value"],
-            strength_level=strength["level"],
+            change_pct=c_change_pct,
+            turnover_rate=c_turnover,
+            fund_strength=c_fund_strength,
+            consecutive_inflow_days=c_consecutive,
+            divergence=c_divergence,
+            history=[], summary_3d=summary_3d, summary_5d=summary_5d,
+            strength_value=strength["value"], strength_level=strength["level"],
+            estimated=not bool(db_records),
         ))
 
     rows.sort(key=lambda r: r.strength_value, reverse=True)
-
     return SectorListResponse(
         date=date,
         last_update=datetime.now().isoformat(),
