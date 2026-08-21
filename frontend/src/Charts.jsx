@@ -98,7 +98,7 @@ export function MinuteChart({ points = [] }) {
     };
   }, [points]);
 
-  return <ReactECharts option={option} style={{ height: 360 }} />;
+  return <ReactECharts option={option} notMerge={true} style={{ height: 360 }} />;
 }
 
 /**
@@ -183,7 +183,7 @@ export function DailyHistoryChart({ history = [] }) {
     };
   }, [history]);
 
-  return <ReactECharts option={option} style={{ height: 320 }} />;
+  return <ReactECharts option={option} notMerge={true} style={{ height: 320 }} />;
 }
 
 /**
@@ -222,5 +222,5 @@ export function NetRateCompareChart({ sectors = [], top = 15 }) {
     };
   }, [sectors, top]);
 
-  return <ReactECharts option={option} style={{ height: 420 }} />;
+  return <ReactECharts option={option} notMerge={true} style={{ height: 420 }} />;
 }

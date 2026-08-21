@@ -88,5 +88,5 @@ export default function DailyChart({ series = [], mode = "net", title = "板块�
     };
   }, [series, mode, title]);
 
-  return <ReactECharts option={option} style={{ height }} />;
+  return <ReactECharts option={option} notMerge={true} style={{ height }} />;
 }
