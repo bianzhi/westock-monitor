@@ -316,8 +316,9 @@ python collector.py --test-daily
    老版本（1.0.3）的 `asfund`/`minute`/`quote`/`board` 命令已废弃。
 2. **数据延迟**：`fund flow` 返回的 `MainNetFlow` 是当日累计值，
    分钟级净流入通过差分得到，本质不是"真分钟级"。
-3. **成交额来源**：westock-data 不提供板块成交额，
-   本项目通过腾讯原始 HTTP 接口（`proxy.finance.qq.com`）补充。
+3. **行情字段来源**：涨跌幅 / 换手率 / 流通市值来自腾讯 `qt.gtimg.cn`
+   板块指数行情（免费、无需 token）；成交额由 westock `fund flow` 的
+   主力买入 + 散户买入（买方总和）自算，并非腾讯接口补充。
 4. **交易日历**：仅判断 A 股交易时段（9:30-11:30, 13:00-15:00），
    非交易时段采集循环空转。
 5. **历史数据**：板块日级历史数据每日收盘后落库到 `sector_daily`/`concept_daily`
