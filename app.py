@@ -1244,7 +1244,7 @@ async def get_sector_daily_history(
 
 @app.get("/api/minute/compare")
 async def get_minute_compare(
-    method: str = Query("rank", description="排序方式: rank=按今日净流入排名 / code=按板块编号 / manual=手动指定"),
+    method: str = Query("rank", description="排序方式: rank=按净流入 / net_rate=按净额率 / fund_strength=按资金强度 / code=按板块编号 / manual=手动指定"),
     start: int = Query(1, ge=1, description="起始序号（1-based）"),
     end: int = Query(10, ge=1, description="结束序号（含）"),
     source: str = Query("l2", description="板块来源: l2=二级板块 / concept=概念板块"),
@@ -1311,32 +1311,80 @@ async def get_minute_compare(
 
         # 后续 series 组装用合并映射取 name，保证跨清单（l2/concept）也能正确显示名称
         sector_map = {c: {"name": n} for c, n in merged_name.items()}
-    elif method == "rank":
-        # 按净流入倒序取区间。
-        # 今日：读实时缓存；历史日期：读落库表当日净流入，保证 top N 板块随日期变动。
+    elif method in ("rank", "net_rate", "fund_strength"):
+        # 按指标倒序取区间。
+        # 今日：读实时缓存；历史日期：读落库表当日数据，保证 top N 板块随日期变动。
+        # 指标：rank=净流入(元) / net_rate=净额率(%) = 净流入/成交额 / fund_strength=资金强度(%) = 净流入/流通市值
         today_td = date.today().strftime("%Y%m%d")
-        if trade_date == today_td:
-            if source == "concept":
+        is_today = (trade_date == today_td)
+
+        def _sf(v):
+            if v is None or v == "": return None
+            try: return float(v)
+            except (TypeError, ValueError): return None
+
+        net_map: Dict[str, Optional[float]] = {}
+        turnover_map: Dict[str, Optional[float]] = {}
+        circ_mv_map: Dict[str, Optional[float]] = {}
+
+        if source == "concept":
+            if is_today:
                 # 读后台 concept_flow 缓存（45s 刷新），不在此同步调 CLI
                 with _concept_flow_lock:
                     flow_map = _concept_flow_cache.get("flow_map", {})
-                def _sf(v):
-                    if v is None or v == "": return None
-                    try: return float(v)
-                    except (TypeError, ValueError): return None
-                ranked = [(c, _sf(flow_map.get(c, {}).get("MainNetFlow")) or 0) for c in all_codes]
+                for c in all_codes:
+                    flow = flow_map.get(c, {})
+                    net_map[c] = _sf(flow.get("MainNetFlow"))
+                    m = calc_sector_metrics(flow, TURNOVER_METHOD) if flow else {}
+                    turnover_map[c] = m.get("turnover")
+                circ_detail = storage.get_latest_sector_circ_mv()
+                for c, d in circ_detail.items():
+                    circ_mv_map[c] = d.get("circ_mv_yi")
             else:
-                # 读 data_cache 日级数据；缓存未就绪时用 0 值（采集线程会填）
-                daily_map = get_daily_map()
-                ranked = [(c, (daily_map.get(c, [{}])[0].get("net_flow") or 0)) for c in all_codes]
-        else:
-            # 历史日期：读落库表当日净流入（asof 取最近交易日，即所选交易日当天）
-            if source == "concept":
                 daily_map = storage.get_concept_daily_asof(all_codes, trade_date, 1)
+                for c in all_codes:
+                    rec = (daily_map.get(c) or [{}])[0]
+                    net_map[c] = rec.get("net_flow")
+                    turnover_map[c] = rec.get("turnover")
+                circ_detail = storage.get_all_sector_circ_mv(trade_date)
+                for c, d in circ_detail.items():
+                    circ_mv_map[c] = d.get("circ_mv_yi")
+        else:
+            if is_today:
+                # 读 data_cache 日级数据（含 net_flow / turnover）；缓存未就绪时用 None
+                daily_map = get_daily_map()
+                for c in all_codes:
+                    rec = (daily_map.get(c) or [{}])[0]
+                    net_map[c] = rec.get("net_flow")
+                    turnover_map[c] = rec.get("turnover")
+                circ_mv_map = get_circ_mv_map()  # {code: circ_mv_yi(亿元)}
             else:
                 daily_map = storage.get_sector_daily_asof(all_codes, trade_date, 1)
-            ranked = [(c, ((daily_map.get(c) or [{}])[0].get("net_flow") or 0)) for c in all_codes]
-        ranked.sort(key=lambda x: x[1], reverse=True)
+                for c in all_codes:
+                    rec = (daily_map.get(c) or [{}])[0]
+                    net_map[c] = rec.get("net_flow")
+                    turnover_map[c] = rec.get("turnover")
+                circ_detail = storage.get_all_sector_circ_mv(trade_date)
+                for c, d in circ_detail.items():
+                    circ_mv_map[c] = d.get("circ_mv_yi")
+
+        def _sort_val(c):
+            net = net_map.get(c)
+            if method == "net_rate":
+                tv = turnover_map.get(c)
+                if net is None or not tv:
+                    return None
+                return net / tv * 100
+            if method == "fund_strength":
+                mv = circ_mv_map.get(c)
+                if net is None or not mv:
+                    return None
+                return net / (mv * 1e8) * 100
+            return net  # rank：按净流入(元)
+
+        ranked = [(c, _sort_val(c)) for c in all_codes]
+        # 无法计算(None)的排最后，其余按值降序
+        ranked.sort(key=lambda x: (x[1] is None, -(x[1] or 0)))
         ordered_codes = [c for c, _ in ranked]
         selected = ordered_codes[start - 1:end]
     else:

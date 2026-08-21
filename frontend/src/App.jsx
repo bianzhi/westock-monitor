@@ -1126,7 +1126,9 @@ export default function App() {
                         onChange={(v) => { setCompareMethod(v); }}
                         style={{ width: 160 }}
                         options={[
-                          { value: "rank", label: "按今日净流入排名" },
+                          { value: "rank", label: "按净流入排名" },
+                          { value: "net_rate", label: "按净额率排名" },
+                          { value: "fund_strength", label: "按资金强度排名" },
                           { value: "code", label: "按板块编号" },
                         ]}
                         disabled={!!manualCodes.trim()}
