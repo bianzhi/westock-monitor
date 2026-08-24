@@ -1221,6 +1221,11 @@ async def get_sector_daily_history(
     # 读取最近 days 个交易日记录（get_sector_daily_batch 按 trade_date 倒序）
     data_map = storage.get_sector_daily_batch(code_list, days=days)
 
+    # 盘中：sector_daily 是收盘后落库，交易时段尚无今日记录；
+    # 从 minute_snapshot 取今日最新累计净流入/成交额，作为日线图的「今日」点。
+    today_td = date.today().strftime("%Y%m%d")
+    today_map = storage.get_latest_minute_snapshot_by_date(code_list, today_td)
+
     series = []
     for code in code_list:
         recs = data_map.get(code, [])
@@ -1231,6 +1236,16 @@ async def get_sector_daily_history(
             "net_flow_yi": _to_yi(r.get("net_flow")),
             "turnover_yi": _to_yi(r.get("turnover")),
         } for r in recs_sorted]
+        # 今日尚未落库且分钟快照有今日数据时，补上今日点（盘中动态更新）
+        has_today = any(r["trade_date"] == today_td for r in recs_sorted)
+        if not has_today:
+            snap = today_map.get(code)
+            if snap and snap.get("main_net_flow") is not None:
+                points.append({
+                    "trade_date": today_td,
+                    "net_flow_yi": _to_yi(snap.get("main_net_flow")),
+                    "turnover_yi": _to_yi(snap.get("turnover")),
+                })
         name = recs[0].get("name") if recs else code
         series.append({
             "code": code,

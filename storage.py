@@ -352,6 +352,46 @@ class Storage:
                 result[d["code"]] = d
             return result
 
+    def get_latest_minute_snapshot_by_date(
+        self, codes: List[str], trade_date: str
+    ) -> Dict[str, Dict]:
+        """获取每个板块在指定交易日的最新一条分钟快照。
+
+        用于盘中：sector_daily 尚未落库今日数据时，从 minute_snapshot 取
+        当日最新累计净流入/成交额，作为日线图的「今日」数据点。
+
+        Args:
+            codes: 板块代码列表
+            trade_date: 交易日 YYYYMMDD
+
+        Returns:
+            {code: {main_net_flow, turnover, timestamp, ...}}
+        """
+        if not codes:
+            return {}
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            placeholders = ",".join("?" * len(codes))
+            cur.execute(
+                f"""
+                SELECT m.* FROM minute_snapshot m
+                INNER JOIN (
+                    SELECT code, MAX(timestamp) AS max_ts
+                    FROM minute_snapshot
+                    WHERE code IN ({placeholders}) AND trade_date = ?
+                    GROUP BY code
+                ) latest ON m.code = latest.code
+                    AND m.timestamp = latest.max_ts
+                """,
+                codes + [trade_date],
+            )
+            result: Dict[str, Dict] = {}
+            for row in cur.fetchall():
+                d = dict(row)
+                result[d["code"]] = d
+            return result
+
     def get_minute_deltas(
         self,
         code: str,
