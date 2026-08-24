@@ -44,7 +44,7 @@ export default function DailyChart({ series = [], mode = "net", title = "板块�
             // series data 是单个数值（category 轴），p.value 即净流入/成交额
             if (p.value == null) return;
             const v = Number(p.value).toFixed(2);
-            const color = COLORS[p.seriesIndex % COLORS.length];
+            const color = Number(p.value) >= 0 ? "#e74c3c" : "#2ecc71";
             html += `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:4px;"></span>`;
             html += `${p.seriesName}: ${v} 亿<br/>`;
           });
@@ -71,10 +71,13 @@ export default function DailyChart({ series = [], mode = "net", title = "板块�
         name: isTurnover ? "成交额(亿)" : "主力净流入(亿)",
         splitLine: { lineStyle: { type: "dashed", color: "#e0e0e0" } },
       },
-      series: series.map((s, idx) => ({
+      series: series.map((s) => ({
         name: s.name,
         type: "bar",
-        itemStyle: { color: COLORS[idx % COLORS.length] },
+        itemStyle: {
+          // 流入为正红色，为负绿色
+          color: (params) => (params.value >= 0 ? "#e74c3c" : "#2ecc71"),
+        },
         data: (s.points || []).map((p) => {
           const v = isTurnover ? p.turnover_yi : p.net_flow_yi;
           return v == null ? null : v;
