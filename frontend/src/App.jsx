@@ -1189,6 +1189,13 @@ export default function App() {
                       <Button icon={<ReloadOutlined />} onClick={() => loadCompare()} loading={compareLoading}>
                         刷新
                       </Button>
+                      {groupCodes.length > 0 && (
+                        <Button
+                          onClick={() => { setGroupCodes([]); message.info("已清空分组勾选"); }}
+                        >
+                          清空分组({groupCodes.length})
+                        </Button>
+                      )}
                       <span>|</span>
                       <Switch
                         checked={focusEnabled}
