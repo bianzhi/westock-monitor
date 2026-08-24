@@ -1114,7 +1114,10 @@ def run_collector_loop(force: bool = False) -> None:
     # 概念板块分钟补采独立计数器：不能复用 cycle（无聚焦分支末尾会重置 cycle，
     # 复用会导致 % CONCEPT_MINUTE_EVERY_N 永不成立——历史 bug）
     concept_cycle = 0
-    CONCEPT_MINUTE_EVERY_N = 5  # 每 N 轮全量采集补采一次概念板块分钟数据（5×60s≈5分钟）
+    # 概念板块分钟采集频率：每轮全量采集都补采一次（与 l2 同频，≈60s 一帧）。
+    # 历史版本设为 5（每 ~5 分钟一次），导致概念板块分时图数据点间隔 6-14 分钟，
+    # 折线稀疏失真。改为 1 后概念板块分时图约 60s 一个点。
+    CONCEPT_MINUTE_EVERY_N = 1
     # 盘后修正窗口去重：按 date 标记，跨日重置（每日 15:00-15:30 仅补采一次）
     fired_after_close_date: str = ""
     fired_after_close: bool = False
