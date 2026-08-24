@@ -172,10 +172,9 @@ export default function App() {
   const [compareLoading, setCompareLoading] = useState(false);
   const compareSeqRef = useRef(0);  // 请求序号，丢弃过期响应避免旧数据覆盖新数据
 
-  // 日线图（板块日级净流入）
+  // 日线图（板块日级行情：净流入 + 涨跌幅 + 成交额）
   const [dailyCodes, setDailyCodes] = useState("");      // 手动输入板块代码
   const [dailyDays, setDailyDays] = useState(30);         // 近 N 交易日
-  const [dailyMode, setDailyMode] = useState("net");      // net / turnover
   const [dailyData, setDailyData] = useState(null);
   const [dailyLoading, setDailyLoading] = useState(false);
 
@@ -1320,7 +1319,7 @@ export default function App() {
               key: "daily",
               label: "日线图",
               children: (
-                <Card title="板块日级净流入折线图" style={{ marginBottom: 16 }}>
+                <Card title="板块日级行情（净流入 / 涨跌幅 / 成交额）" style={{ marginBottom: 16 }}>
                   <Space style={{ marginBottom: 12 }} wrap>
                     <span>板块代码：</span>
                     <Input
@@ -1337,24 +1336,14 @@ export default function App() {
                       style={{ width: 70 }}
                     />
                     <span>个交易日</span>
-                    <Select
-                      value={dailyMode}
-                      onChange={setDailyMode}
-                      style={{ width: 130 }}
-                      options={[
-                        { value: "net", label: "主力净流入(亿)" },
-                        { value: "turnover", label: "成交额(亿)" },
-                      ]}
-                    />
                     <Button type="primary" onClick={loadDailyHistory} loading={dailyLoading}>
                       加载
                     </Button>
                   </Space>
                   <DailyChart
-                    title="板块日级净流入"
-                    mode={dailyMode}
+                    title="板块日级行情"
                     series={dailyData?.series || []}
-                    height={520}
+                    height={560}
                   />
                 </Card>
               ),

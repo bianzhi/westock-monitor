@@ -1226,15 +1226,22 @@ async def get_sector_daily_history(
     today_td = date.today().strftime("%Y%m%d")
     today_map = storage.get_latest_minute_snapshot_by_date(code_list, today_td)
 
+    # 涨跌幅：历史读 sector_circ_mv，今日读最新落库（sector_circ_mv 按交易日落库）
+    change_pct_map = storage.get_sector_change_pct_batch(code_list, days)
+    _today_circ = storage.get_all_sector_circ_mv(today_td)
+    today_change_pct = {c: d.get("change_pct") for c, d in _today_circ.items()}
+
     series = []
     for code in code_list:
         recs = data_map.get(code, [])
         # 倒序 → 升序，供折线图从左到右
         recs_sorted = sorted(recs, key=lambda r: r["trade_date"])
+        cp_map = change_pct_map.get(code, {})
         points = [{
             "trade_date": r["trade_date"],
             "net_flow_yi": _to_yi(r.get("net_flow")),
             "turnover_yi": _to_yi(r.get("turnover")),
+            "change_pct": cp_map.get(r["trade_date"]),
         } for r in recs_sorted]
         # 今日尚未落库且分钟快照有今日数据时，补上今日点（盘中动态更新）
         has_today = any(r["trade_date"] == today_td for r in recs_sorted)
@@ -1245,6 +1252,7 @@ async def get_sector_daily_history(
                     "trade_date": today_td,
                     "net_flow_yi": _to_yi(snap.get("main_net_flow")),
                     "turnover_yi": _to_yi(snap.get("turnover")),
+                    "change_pct": today_change_pct.get(code),
                 })
         name = recs[0].get("name") if recs else code
         series.append({

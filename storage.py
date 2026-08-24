@@ -676,6 +676,40 @@ class Storage:
                 result[d["code"]] = d
             return result
 
+    def get_sector_change_pct_batch(self, codes: List[str], days: int = 30) -> Dict[str, Dict[str, float]]:
+        """批量读板块近 N 交易日的涨跌幅 change_pct（sector_circ_mv 表）。
+
+        用于日线图展示涨跌幅曲线。sector_circ_mv 按交易日落库，涨跌幅历史
+        覆盖天数可能少于 sector_daily（流通市值/涨跌幅采集启动较晚）。
+
+        Args:
+            codes: 板块代码列表
+            days: 往回取的天数上限
+
+        Returns:
+            {code: {trade_date: change_pct}}，change_pct 为 % 数值
+        """
+        if not codes:
+            return {}
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            placeholders = ",".join("?" * len(codes))
+            cur.execute(
+                f"""SELECT code, trade_date, change_pct
+                    FROM sector_circ_mv
+                    WHERE code IN ({placeholders})
+                    ORDER BY trade_date DESC
+                    LIMIT ?""",
+                codes + [days * len(codes)],
+            )
+            result: Dict[str, Dict[str, float]] = {c: {} for c in codes}
+            for row in cur.fetchall():
+                d = dict(row)
+                if d.get("change_pct") is not None:
+                    result[d["code"]][d["trade_date"]] = d["change_pct"]
+            return result
+
     def get_latest_sector_circ_mv(self) -> Dict[str, Dict]:
         """获取每个板块最新一日的流通市值缓存。
 
