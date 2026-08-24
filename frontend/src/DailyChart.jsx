@@ -73,13 +73,8 @@ export default function DailyChart({ series = [], mode = "net", title = "板块�
       },
       series: series.map((s, idx) => ({
         name: s.name,
-        type: "line",
-        smooth: true,
-        symbol: "circle",
-        symbolSize: 4,
-        lineStyle: { width: 2, color: COLORS[idx % COLORS.length] },
+        type: "bar",
         itemStyle: { color: COLORS[idx % COLORS.length] },
-        connectNulls: false,  // 缺交易日数据不连线
         data: (s.points || []).map((p) => {
           const v = isTurnover ? p.turnover_yi : p.net_flow_yi;
           return v == null ? null : v;
