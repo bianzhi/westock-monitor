@@ -30,7 +30,8 @@ export default function DailyChart({ series = [], title = "板块日级行情", 
     //   涨(pct>=0)：实体从 0 到 pct，low=0, high=pct → 阳线(红)
     //   跌(pct<0) ：实体从 pct 到 0，low=pct, high=0 → 阴线(绿)
     const kline = s.points.map((p) => {
-      if (p.change_pct == null) return null;
+      // ECharts candlestick 空数据须用 "-"，不能用 null（null 会导致 getInitialData 崩溃）
+      if (p.change_pct == null) return "-";
       const pct = Number(p.change_pct);
       return pct >= 0 ? [0, pct, 0, pct] : [0, pct, pct, 0];
     });
