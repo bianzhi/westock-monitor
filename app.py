@@ -189,6 +189,8 @@ class SectorRow(BaseModel):
     strength_value: float = 0.0                  # 连续强度值 -2~+2
     strength_level: str = "普通"                 # 5档判定词
     estimated: bool = False                      # True=缓存空仅今日 fallback，非真多日累加
+    limit_up_count: int = 0                      # 日内涨停票个数
+    limit_up_names: List[Dict[str, Any]] = []    # 涨停票 [{code,name,lbc}]，折叠展示
 
 
 class SectorListResponse(BaseModel):
@@ -197,6 +199,30 @@ class SectorListResponse(BaseModel):
     n_window: int
     sectors: List[SectorRow]
     total: int
+
+
+class LimitUpRow(BaseModel):
+    code: str
+    name: Optional[str] = None
+    price: Optional[float] = None            # 涨停价(元)
+    change_pct: Optional[float] = None        # 涨跌幅(%)
+    amount: Optional[float] = None            # 成交额(元)
+    ltsz: Optional[float] = None              # 流通市值(元)
+    turnover_rate: Optional[float] = None     # 换手率(%)
+    lbc: Optional[int] = None                 # 连板数
+    fbt: Optional[str] = None                 # 首次涨停时间 HHMMSS
+    lbt: Optional[str] = None                 # 最后封板时间 HHMMSS
+    fund: Optional[float] = None              # 封单资金(元)
+    zbc: Optional[int] = None                 # 开板次数
+    hybk: Optional[str] = None                # 所属行业
+    zt_days: Optional[int] = None             # 涨停天数
+    zt_ct: Optional[int] = None               # 涨停次数
+
+
+class LimitUpResponse(BaseModel):
+    date: str
+    total: int
+    pool: List[LimitUpRow]
 
 
 class MinuteDataResponse(BaseModel):
@@ -469,6 +495,9 @@ async def get_sectors(
     # 组装宽表行
     rows: List[SectorRow] = []
     today_str = date.today().isoformat()
+    # 日内涨停票聚合（成分股 ∩ 涨停池，按板块一次 JOIN）
+    limit_up_date = date.today().strftime("%Y%m%d")
+    limit_up_by_sector = storage.get_limit_up_by_sector(limit_up_date)
 
     for sec in sector_list:
         code = sec["code"]
@@ -514,6 +543,11 @@ async def get_sectors(
         divergence = (today_net is not None and today_net > 0
                       and change_pct is not None and change_pct < 0)
 
+        # 涨停票（成分股 ∩ 涨停池）
+        limit_up = limit_up_by_sector.get(code, [])
+        limit_up_names = [{"code": x["code"], "name": x["name"], "lbc": x.get("lbc")}
+                          for x in limit_up]
+
         rows.append(SectorRow(
             code=code,
             name=sec.get("name") or meta.get("name", ""),
@@ -533,6 +567,8 @@ async def get_sectors(
             summary_5d=summary_5d,
             strength_value=strength["value"],
             strength_level=strength["level"],
+            limit_up_count=len(limit_up),
+            limit_up_names=limit_up_names,
         ))
 
     rows.sort(key=lambda r: r.strength_value, reverse=True)
@@ -544,6 +580,25 @@ async def get_sectors(
         sectors=rows,
         total=len(rows),
     )
+
+
+@app.get("/api/limit-up", response_model=LimitUpResponse)
+async def get_limit_up(
+    date: Optional[str] = Query(None, description="YYYY-MM-DD，默认今天"),
+):
+    """涨停池列表（涨停票信息页数据源）。
+
+    数据来自 limit_up_pool 落库表（东方财富 getTopicZTPool 采集），
+    按连板数、封单资金排序。
+    """
+    storage = get_storage()
+    trade_date = date.replace("-", "") if date else datetime.now().strftime("%Y%m%d")
+    pool = storage.get_limit_up_pool(trade_date)
+    _fields = ("code", "name", "price", "change_pct", "amount", "ltsz",
+               "turnover_rate", "lbc", "fbt", "lbt", "fund", "zbc", "hybk",
+               "zt_days", "zt_ct")
+    rows = [LimitUpRow(**{k: r.get(k) for k in _fields}) for r in pool]
+    return LimitUpResponse(date=trade_date, total=len(rows), pool=rows)
 
 
 # ============================================================
@@ -627,6 +682,12 @@ def _circ_mv_loop_entry():
     """
     from collector import run_circ_mv_loop
     run_circ_mv_loop()
+
+
+def _limit_up_loop_entry():
+    """涨停池 + 板块成分股采集线程入口（延迟导入，供守护器使用）。"""
+    from collector import run_limit_up_loop
+    run_limit_up_loop()
 
 
 def _supervise_thread(target, name: str, restart_delay: int = 10,
@@ -735,6 +796,9 @@ async def get_concept_sectors(
         today_str = date.today().isoformat()
         # 批量读流通市值缓存（含 change_pct/turnover_rate，方案 C 腾讯落库）
         circ_mv_detail = storage.get_latest_sector_circ_mv()
+        # 日内涨停票聚合（成分股 ∩ 涨停池，按板块一次 JOIN）
+        limit_up_date = date.today().strftime("%Y%m%d")
+        limit_up_by_sector = storage.get_limit_up_by_sector(limit_up_date)
         for code in codes:
             flow = flow_map.get(code, {})
             metrics = calc_sector_metrics(flow, TURNOVER_METHOD) if flow else {}
@@ -796,6 +860,10 @@ async def get_concept_sectors(
             # 背离：净流入 > 0 但涨跌幅 < 0
             c_divergence = (today_net is not None and today_net > 0
                             and c_change_pct is not None and c_change_pct < 0)
+            # 涨停票（成分股 ∩ 涨停池）
+            c_limit_up = limit_up_by_sector.get(code, [])
+            c_limit_up_names = [{"code": x["code"], "name": x["name"], "lbc": x.get("lbc")}
+                                for x in c_limit_up]
             # 强度判定输入与展示输入一致：用近 n 日真记录（不足 n 时用已有），
             # 流通市值用真实值（修复硬编码 None 导致全部「普通」的问题）
             strength_records = (cached_daily[:n] if cached_daily else [today_rec])
@@ -815,6 +883,8 @@ async def get_concept_sectors(
                 history=[], summary_3d=summary_3d, summary_5d=summary_5d,
                 strength_value=strength["value"], strength_level=strength["level"],
                 estimated=cached_empty_fallback,
+                limit_up_count=len(c_limit_up),
+                limit_up_names=c_limit_up_names,
             ))
 
         rows.sort(key=lambda r: r.strength_value, reverse=True)
@@ -2125,7 +2195,9 @@ try:
                          args=(_concept_flow_loop, "concept_flow", 10, True)).start()
         threading.Thread(target=_supervise_thread, daemon=True, name="sup_circ_mv",
                          args=(_circ_mv_loop_entry, "circ_mv", 10, True)).start()
-        logger.info("thread supervisors started (startup_init/collector/concept_flow/circ_mv)")
+        threading.Thread(target=_supervise_thread, daemon=True, name="sup_limit_up",
+                         args=(_limit_up_loop_entry, "limit_up", 10, True)).start()
+        logger.info("thread supervisors started (startup_init/collector/concept_flow/circ_mv/limit_up)")
 
         yield  # 应用运行中...
 
@@ -2197,7 +2269,9 @@ except ImportError:
                          args=(_concept_flow_loop, "concept_flow", 10, True)).start()
         threading.Thread(target=_supervise_thread, daemon=True, name="sup_circ_mv",
                          args=(_circ_mv_loop_entry, "circ_mv", 10, True)).start()
-        logger.info("thread supervisors started (startup_init/collector/concept_flow/circ_mv)")
+        threading.Thread(target=_supervise_thread, daemon=True, name="sup_limit_up",
+                         args=(_limit_up_loop_entry, "limit_up", 10, True)).start()
+        logger.info("thread supervisors started (startup_init/collector/concept_flow/circ_mv/limit_up)")
 
 
 # ============================================================

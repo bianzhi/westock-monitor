@@ -215,6 +215,49 @@ class Storage:
                 ON sector_daily(trade_date)
             """)
 
+            # 涨停池表（日级，东方财富 getTopicZTPool 采集）
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS limit_up_pool (
+                    code            TEXT NOT NULL,      -- 带前缀股票代码 sh600519
+                    name            TEXT,
+                    trade_date      TEXT NOT NULL,      -- YYYYMMDD
+                    price           REAL,               -- 涨停价(元)
+                    change_pct      REAL,               -- 涨跌幅(%)
+                    amount          REAL,               -- 成交额(元)
+                    ltsz            REAL,               -- 流通市值(元)
+                    turnover_rate   REAL,               -- 换手率(%)
+                    lbc             INTEGER,            -- 连板数
+                    fbt             TEXT,               -- 首次涨停时间 HHMMSS
+                    lbt             TEXT,               -- 最后封板时间 HHMMSS
+                    fund            REAL,               -- 封单资金(元)
+                    zbc             INTEGER,            -- 开板次数
+                    hybk            TEXT,               -- 所属行业
+                    zt_days         INTEGER,            -- 涨停天数
+                    zt_ct           INTEGER,            -- 涨停次数
+                    updated_at      TEXT,
+                    PRIMARY KEY (code, trade_date)
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_limit_up_date
+                ON limit_up_pool(trade_date)
+            """)
+
+            # 板块成分股表（westock sector constituent 采集，供板块涨停票统计）
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS sector_constituent (
+                    sector_code     TEXT NOT NULL,      -- 板块代码 pt02003547
+                    stock_code      TEXT NOT NULL,      -- 带前缀股票代码 sh600519
+                    stock_name      TEXT,
+                    updated_at      TEXT,
+                    PRIMARY KEY (sector_code, stock_code)
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_constituent_stock
+                ON sector_constituent(stock_code)
+            """)
+
             conn.commit()
         logger.info("storage initialized: %s", self.db_path)
 
@@ -1070,6 +1113,143 @@ class Storage:
         if deleted:
             logger.info("sector_daily: cleaned %d old records", deleted)
         return deleted
+
+    # ============================================================
+    # 涨停池 / 板块成分股
+    # ============================================================
+    def upsert_limit_up_pool(self, rows: List[Dict]) -> int:
+        """批量写入涨停池（按 code + trade_date 去重）。
+
+        Args:
+            rows: [{code, name, trade_date(YYYYMMDD), price, change_pct, amount,
+                    ltsz, turnover_rate, lbc, fbt, lbt, fund, zbc, hybk,
+                    zt_days, zt_ct}, ...]
+
+        Returns:
+            写入行数
+        """
+        if not rows:
+            return 0
+        now = datetime.now().isoformat(timespec="seconds")
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            count = 0
+            for r in rows:
+                try:
+                    cur.execute(
+                        """INSERT OR REPLACE INTO limit_up_pool
+                           (code, name, trade_date, price, change_pct, amount,
+                            ltsz, turnover_rate, lbc, fbt, lbt, fund, zbc, hybk,
+                            zt_days, zt_ct, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (r["code"], r.get("name"), r["trade_date"], r.get("price"),
+                         r.get("change_pct"), r.get("amount"), r.get("ltsz"),
+                         r.get("turnover_rate"), r.get("lbc"), r.get("fbt"),
+                         r.get("lbt"), r.get("fund"), r.get("zbc"), r.get("hybk"),
+                         r.get("zt_days"), r.get("zt_ct"), now),
+                    )
+                    count += 1
+                except sqlite3.Error as e:
+                    logger.warning("limit_up_pool upsert %s: %s", r.get("code"), e)
+            conn.commit()
+        logger.info("limit_up_pool: upserted %d records", count)
+        return count
+
+    def get_limit_up_pool(self, trade_date: str) -> List[Dict]:
+        """查询指定交易日的涨停池列表（按连板数、封单资金排序）。"""
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT * FROM limit_up_pool
+                   WHERE trade_date = ?
+                   ORDER BY lbc DESC, fund DESC""",
+                (trade_date,),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def get_limit_up_pool_map(self, trade_date: str) -> Dict[str, Dict]:
+        """查询指定交易日涨停池，返回 {stock_code: row}，供板块涨停票交集。"""
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT * FROM limit_up_pool WHERE trade_date = ?""",
+                (trade_date,),
+            )
+            return {row["code"]: dict(row) for row in cur.fetchall()}
+
+    def upsert_sector_constituents(self, sector_code: str, stocks: List[Dict]) -> int:
+        """写入某板块的成分股（按 sector_code + stock_code 去重）。
+
+        Args:
+            sector_code: 板块代码 pt02003547
+            stocks: [{code: "sh600519", name: "紫金矿业"}, ...]
+
+        Returns:
+            写入行数
+        """
+        if not stocks:
+            return 0
+        now = datetime.now().isoformat(timespec="seconds")
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            count = 0
+            for s in stocks:
+                try:
+                    cur.execute(
+                        """INSERT OR REPLACE INTO sector_constituent
+                           (sector_code, stock_code, stock_name, updated_at)
+                           VALUES (?, ?, ?, ?)""",
+                        (sector_code, s.get("code"), s.get("name"), now),
+                    )
+                    count += 1
+                except sqlite3.Error as e:
+                    logger.warning("sector_constituent upsert %s/%s: %s",
+                                   sector_code, s.get("code"), e)
+            conn.commit()
+        return count
+
+    def get_sector_constituents(self, sector_code: str) -> List[Dict]:
+        """查询某板块成分股列表。"""
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT stock_code AS code, stock_name AS name
+                   FROM sector_constituent WHERE sector_code = ?""",
+                (sector_code,),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def get_limit_up_by_sector(self, trade_date: str) -> Dict[str, List[Dict]]:
+        """按板块聚合当日涨停票（成分股 ∩ 涨停池，一次 JOIN 返回）。
+
+        Returns:
+            {sector_code: [{code, name, lbc, ...}, ...]}
+            每只涨停票附完整涨停池字段（连板数/封单/时间/行业等）。
+        """
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT sc.sector_code,
+                          lu.code, lu.name, lu.price, lu.change_pct,
+                          lu.lbc, lu.fbt, lu.lbt, lu.fund, lu.zbc,
+                          lu.hybk, lu.zt_days, lu.zt_ct
+                   FROM sector_constituent sc
+                   JOIN limit_up_pool lu ON sc.stock_code = lu.code
+                   WHERE lu.trade_date = ?
+                   ORDER BY sc.sector_code, lu.lbc DESC, lu.fund DESC""",
+                (trade_date,),
+            )
+            result: Dict[str, List[Dict]] = {}
+            for row in cur.fetchall():
+                d = dict(row)
+                result.setdefault(d.pop("sector_code"), []).append(d)
+            return result
 
     # ============================================================
     # 统计信息

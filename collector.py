@@ -53,7 +53,7 @@ from config import (
 )
 from sectors import DEFAULT_SECTORS, get_default_codes, get_default_sector_map
 from westock import (
-    fund_flow, sector_ranking, search_sector,
+    fund_flow, sector_ranking, search_sector, sector_constituent,
     extract_main_net_flow, extract_main_inflow, extract_main_outflow,
 )
 from westock_fund_metrics import (
@@ -1395,6 +1395,161 @@ def run_circ_mv_loop(force: bool = False) -> None:
             fired.pop(d, None)
 
         time.sleep(CIRC_MV_CHECK_INTERVAL)
+
+
+# ============================================================
+# 涨停池 / 板块成分股采集
+# ============================================================
+_LIMIT_UP_URL = "https://push2ex.eastmoney.com/getTopicZTPool"
+
+
+def _add_stock_prefix(code: str) -> str:
+    """6 位数字股票代码补交易所前缀（东财涨停池只给 6 位数字）。"""
+    code = (code or "").strip()
+    if len(code) != 6 or not code.isdigit():
+        return code
+    if code.startswith(("6", "9")):
+        return "sh" + code
+    if code.startswith(("0", "3")):
+        return "sz" + code
+    if code.startswith(("4", "8")):
+        return "bj" + code
+    return code
+
+
+def _fmt_zt_time(v: Any) -> Optional[str]:
+    """92500 -> '092500'（涨停时间 HHMMSS）。"""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s.isdigit():
+        return None
+    return s.zfill(6)
+
+
+def collect_limit_up_pool(trade_date: Optional[str] = None) -> Dict[str, Any]:
+    """采集当日全市场涨停池（东方财富 getTopicZTPool），落库 limit_up_pool。
+
+    数据源优先级说明：涨停池名单 westock CLI 无法直接获取（changedist 只有家数
+    无名单、quote 已废弃），故走东方财富 HTTP 接口兜底（符合「westock 优先、
+    缺失字段走 HTTP 兜底」原则）。
+
+    Args:
+        trade_date: 交易日 YYYYMMDD，默认今天
+
+    Returns:
+        {trade_date, count, saved, error?}
+    """
+    import urllib.request
+
+    if trade_date is None:
+        trade_date = datetime.now().strftime("%Y%m%d")
+
+    url = (
+        f"{_LIMIT_UP_URL}?ut=7eea3edcaed734bea9cbfc24409ed989"
+        f"&dpt=wz.ztzt&Pageindex=0&pagesize=500&sort=fbt%3Aasc&date={trade_date}"
+    )
+    rows: List[Dict] = []
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+        pool = (payload.get("data") or {}).get("pool") or []
+        for item in pool:
+            zttj = item.get("zttj") or {}
+            p = item.get("p")
+            rows.append({
+                "code": _add_stock_prefix(str(item.get("c", ""))),
+                "name": item.get("n"),
+                "trade_date": trade_date,
+                "price": (_safe_float(p) / 1000.0) if p is not None else None,
+                "change_pct": _safe_float(item.get("zdp")),
+                "amount": _safe_float(item.get("amount")),
+                "ltsz": _safe_float(item.get("ltsz")),
+                "turnover_rate": _safe_float(item.get("hs")),
+                "lbc": item.get("lbc"),
+                "fbt": _fmt_zt_time(item.get("fbt")),
+                "lbt": _fmt_zt_time(item.get("lbt")),
+                "fund": _safe_float(item.get("fund")),
+                "zbc": item.get("zbc"),
+                "hybk": item.get("hybk"),
+                "zt_days": zttj.get("days"),
+                "zt_ct": zttj.get("ct"),
+            })
+    except Exception as e:
+        logger.warning("collect_limit_up_pool error: %s", e)
+        return {"trade_date": trade_date, "count": 0, "saved": 0, "error": str(e)}
+
+    saved = get_storage().upsert_limit_up_pool(rows)
+    logger.info("collect_limit_up_pool: %s count=%d saved=%d", trade_date, len(rows), saved)
+    return {"trade_date": trade_date, "count": len(rows), "saved": saved}
+
+
+def collect_all_sector_constituents(codes: Optional[List[str]] = None) -> Dict[str, Any]:
+    """采集板块成分股（westock sector constituent），落库 sector_constituent。
+
+    Args:
+        codes: 板块代码列表，默认全量（load_sectors）
+
+    Returns:
+        {sectors, stocks, saved}
+    """
+    if codes is None:
+        codes = get_sector_codes()
+    if not codes:
+        return {"sectors": 0, "stocks": 0, "saved": 0}
+
+    storage = get_storage()
+    total_stocks = 0
+    total_saved = 0
+    for i in range(0, len(codes), 20):
+        batch = codes[i:i + 20]
+        try:
+            result = sector_constituent(batch, raw=True)
+        except Exception as e:
+            logger.warning("sector_constituent batch error: %s", e)
+            continue
+        for pt_code, items in (result or {}).items():
+            stocks = [{"code": it.get("code"), "name": it.get("name")} for it in items]
+            total_stocks += len(stocks)
+            total_saved += storage.upsert_sector_constituents(pt_code, stocks)
+    logger.info("collect_all_sector_constituents: sectors=%d stocks=%d saved=%d",
+                len(codes), total_stocks, total_saved)
+    return {"sectors": len(codes), "stocks": total_stocks, "saved": total_saved}
+
+
+def run_limit_up_loop(force: bool = False) -> None:
+    """涨停池 + 板块成分股采集循环。
+
+    - 涨停池：交易时段每 ~60s 采一次（东方财富接口，快，独立于 westock CLI）
+    - 成分股：每日一次（非交易时段触发，846 板块分批，量大放盘后）
+
+    Args:
+        force: True 时非交易时段也持续采集（测试用）
+    """
+    logger.info("=== limit_up loop started (force=%s) ===", force)
+    constituent_date = ""
+    while True:
+        now = datetime.now()
+        today_str = now.strftime("%Y%m%d")
+        trading = is_trading_time(now)
+
+        # 涨停池采集（交易时段）
+        if trading or force:
+            try:
+                collect_limit_up_pool(today_str)
+            except Exception as e:
+                logger.warning("limit_up pool collect error: %s", e)
+
+        # 成分股每日一次（非交易时段触发，跨日去重；失败下次重试）
+        if constituent_date != today_str and (force or not trading):
+            try:
+                collect_all_sector_constituents()
+                constituent_date = today_str
+            except Exception as e:
+                logger.warning("constituent collect error: %s", e)
+
+        time.sleep(MINUTE_INTERVAL if trading else IDLE_SLEEP)
 
 
 # ============================================================

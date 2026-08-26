@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useRef, useMemo } from "react"
 import {
   Layout, Table, Button, Input, Select, Card, Row, Col, Statistic,
   message, Space, Modal, Descriptions, Spin, Tabs, Switch, InputNumber,
-  Tooltip, Badge, Drawer, DatePicker, Checkbox,
+  Tooltip, Badge, Drawer, DatePicker, Checkbox, Popover,
 } from "antd";
 import {
   ReloadOutlined, PlayCircleOutlined, ThunderboltOutlined,
@@ -21,6 +21,7 @@ import L1Tab from "./L1Tab";
 import CompareChart from "./CompareChart";
 import DailyChart from "./DailyChart";
 import AlertsTab from "./AlertsTab";
+import LimitUpTab from "./LimitUpTab";
 import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect, fetchUserPrefs, saveUserPrefs, fetchConceptSectors, fetchConceptSectorsHistory, fetchSectorsHistory, fetchErrors, fetchWatchlist, addWatchlist, removeWatchlist, refreshConcepts, fetchSectorDailyHistory } from "./api";
 import AuthGuard from "./components/AuthGuard";
 
@@ -643,6 +644,34 @@ export default function App() {
       width: 90,
       sorter: (a, b) => (a.turnover_rate ?? 0) - (b.turnover_rate ?? 0),
       render: (v) => v != null ? v.toFixed(2) + "%" : "-",
+    },
+    {
+      title: "涨停票",
+      key: "limit_up",
+      width: 80,
+      sorter: (a, b) => (a.limit_up_count ?? 0) - (b.limit_up_count ?? 0),
+      render: (_, r) => {
+        const count = r.limit_up_count ?? 0;
+        const names = r.limit_up_names ?? [];
+        if (count === 0) return <span style={{ color: "#bbb" }}>0</span>;
+        const content = (
+          <div style={{ maxWidth: 280, maxHeight: 260, overflowY: "auto" }}>
+            {names.map((s) => (
+              <div key={s.code} style={{ display: "flex", justifyContent: "space-between", gap: 12, lineHeight: 1.8 }}>
+                <span>{s.name}</span>
+                {s.lbc != null && s.lbc > 0 ? (
+                  <span style={{ color: "#e74c3c", fontWeight: 700 }}>{s.lbc}板</span>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        );
+        return (
+          <Popover content={content} title={`${count} 只涨停`} trigger="hover">
+            <span style={{ color: "#e74c3c", fontWeight: 700, cursor: "pointer" }}>{count}</span>
+          </Popover>
+        );
+      },
     },
     {
       title: "今日成交额(亿)",
@@ -1347,6 +1376,11 @@ export default function App() {
                   />
                 </Card>
               ),
+            },
+            {
+              key: "limit-up",
+              label: "涨停池",
+              children: <LimitUpTab />,
             },
           ]}
         />

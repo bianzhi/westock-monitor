@@ -51,6 +51,9 @@ export const fetchSectorsHistory = (date, n) =>
 export const fetchConceptSectorsHistory = (date, n) =>
   api.get("/sectors/concept/history", { params: { date, n } }).then((r) => r.data);
 
+export const fetchLimitUp = (date) =>
+  api.get("/limit-up", { params: { date } }).then((r) => r.data);
+
 export const fetchSectorDailyHistory = (codes, days = 30) =>
   api
     .get("/sector-daily-history", { params: { codes, days } })
