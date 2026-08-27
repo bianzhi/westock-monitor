@@ -64,6 +64,8 @@ export default function App() {
   // 分时图分组（group）：勾选的板块归入「分组」，分时图只显示分组内板块。
   // 纯前端状态，跨 l2/concept Tab 共享；空则不干预分时图原有逻辑。
   const [groupCodes, setGroupCodes] = useState([]);
+  // 「只看勾选」开关：开启后宽表只显示已勾选（groupCodes）的板块
+  const [onlyGroup, setOnlyGroup] = useState(false);
 
   const loadWatchlist = useCallback(async () => {
     try {
@@ -503,8 +505,9 @@ export default function App() {
       if (!m) return false;
     }
     if (scaleFilter.length && !scaleFilter.includes(r.scale)) return false;
+    if (onlyGroup && !groupCodes.includes(r.code)) return false;
     return true;
-  }), [sectorsSorted, strengthFilter, consecutiveFilter, scaleFilter]);
+  }), [sectorsSorted, strengthFilter, consecutiveFilter, scaleFilter, onlyGroup, groupCodes]);
 
   const filteredConcepts = useMemo(() => conceptSectors.filter((r) => {
     if (strengthFilter.length && !strengthFilter.includes(r.strength_level)) return false;
@@ -516,8 +519,9 @@ export default function App() {
       if (!m) return false;
     }
     if (scaleFilter.length && !scaleFilter.includes(r.scale)) return false;
+    if (onlyGroup && !groupCodes.includes(r.code)) return false;
     return true;
-  }), [conceptSectors, strengthFilter, consecutiveFilter, scaleFilter]);
+  }), [conceptSectors, strengthFilter, consecutiveFilter, scaleFilter, onlyGroup, groupCodes]);
 
   // 表格列定义（useMemo 避免每次渲染重建引用导致 Table 闪烁）
   // watchlist 进 deps：勾选状态变了列渲染要更新；置顶排序在 dataSource 处理
@@ -1090,6 +1094,13 @@ export default function App() {
                           { value: "中盘", label: "中盘" },
                           { value: "小盘", label: "小盘" },
                         ]} />
+                      <Button
+                        type={onlyGroup ? "primary" : "default"}
+                        onClick={() => setOnlyGroup(!onlyGroup)}
+                        title="只显示已勾选的板块"
+                      >
+                        {onlyGroup ? `只看勾选(${groupCodes.length})` : "只看勾选"}
+                      </Button>
                     </Space>
                     <Table
                       rowKey="code"
@@ -1319,6 +1330,13 @@ export default function App() {
                         { value: "中盘", label: "中盘" },
                         { value: "小盘", label: "小盘" },
                       ]} />
+                    <Button
+                      type={onlyGroup ? "primary" : "default"}
+                      onClick={() => setOnlyGroup(!onlyGroup)}
+                      title="只显示已勾选的板块"
+                    >
+                      {onlyGroup ? `只看勾选(${groupCodes.length})` : "只看勾选"}
+                    </Button>
                   </Space>
                   <Table
                     rowKey="code"
