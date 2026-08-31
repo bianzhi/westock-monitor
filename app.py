@@ -191,6 +191,7 @@ class SectorRow(BaseModel):
     estimated: bool = False                      # True=缓存空仅今日 fallback，非真多日累加
     limit_up_count: int = 0                      # 日内涨停票个数
     limit_up_names: List[Dict[str, Any]] = []    # 涨停票 [{code,name,lbc}]，折叠展示
+    change_pct_history: List[float] = []         # 近 N 日涨跌幅序列（从新到旧），连涨筛选用
 
 
 class SectorListResponse(BaseModel):
@@ -498,6 +499,8 @@ async def get_sectors(
     # 日内涨停票聚合（成分股 ∩ 涨停池，按板块一次 JOIN）
     limit_up_date = date.today().strftime("%Y%m%d")
     limit_up_by_sector = storage.get_limit_up_by_sector(limit_up_date)
+    # 涨跌幅历史序列（从新到旧，连涨筛选）
+    change_pct_hist = storage.get_change_pct_history(codes)
 
     for sec in sector_list:
         code = sec["code"]
@@ -547,6 +550,8 @@ async def get_sectors(
         limit_up = limit_up_by_sector.get(code, [])
         limit_up_names = [{"code": x["code"], "name": x["name"], "lbc": x.get("lbc")}
                           for x in limit_up]
+        # 涨跌幅历史序列（连涨筛选）
+        change_pct_history = change_pct_hist.get(code, [])
 
         rows.append(SectorRow(
             code=code,
@@ -569,6 +574,7 @@ async def get_sectors(
             strength_level=strength["level"],
             limit_up_count=len(limit_up),
             limit_up_names=limit_up_names,
+            change_pct_history=change_pct_history,
         ))
 
     rows.sort(key=lambda r: r.strength_value, reverse=True)
@@ -799,6 +805,8 @@ async def get_concept_sectors(
         # 日内涨停票聚合（成分股 ∩ 涨停池，按板块一次 JOIN）
         limit_up_date = date.today().strftime("%Y%m%d")
         limit_up_by_sector = storage.get_limit_up_by_sector(limit_up_date)
+        # 涨跌幅历史序列（从新到旧，连涨筛选）
+        change_pct_hist = storage.get_change_pct_history(codes)
         for code in codes:
             flow = flow_map.get(code, {})
             metrics = calc_sector_metrics(flow, TURNOVER_METHOD) if flow else {}
@@ -864,6 +872,8 @@ async def get_concept_sectors(
             c_limit_up = limit_up_by_sector.get(code, [])
             c_limit_up_names = [{"code": x["code"], "name": x["name"], "lbc": x.get("lbc")}
                                 for x in c_limit_up]
+            # 涨跌幅历史序列（连涨筛选）
+            change_pct_history = change_pct_hist.get(code, [])
             # 强度判定输入与展示输入一致：用近 n 日真记录（不足 n 时用已有），
             # 流通市值用真实值（修复硬编码 None 导致全部「普通」的问题）
             strength_records = (cached_daily[:n] if cached_daily else [today_rec])
@@ -885,6 +895,7 @@ async def get_concept_sectors(
                 estimated=cached_empty_fallback,
                 limit_up_count=len(c_limit_up),
                 limit_up_names=c_limit_up_names,
+                change_pct_history=change_pct_history,
             ))
 
         rows.sort(key=lambda r: r.strength_value, reverse=True)

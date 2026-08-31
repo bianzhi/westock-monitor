@@ -66,6 +66,8 @@ export default function App() {
   const [groupCodes, setGroupCodes] = useState([]);
   // 「只看勾选」开关：开启后宽表只显示已勾选（groupCodes）的板块
   const [onlyGroup, setOnlyGroup] = useState(false);
+  // 连涨筛选（下拉复选）：连涨2天 / 最近3天涨2天 / 连涨3天
+  const [upStreakFilter, setUpStreakFilter] = useState([]);
 
   const loadWatchlist = useCallback(async () => {
     try {
@@ -493,6 +495,21 @@ export default function App() {
     return [...starred, ...rest];
   }, [sectors, watchlist]);
 
+  // 连涨筛选判断：hist 为近 N 日涨跌幅序列（从新到旧 [最近一日, 前一日, ...]）
+  const matchUpStreak = useCallback((hist, cond) => {
+    const h = hist || [];
+    if (cond === "up2") return h.length >= 2 && h[0] > 0 && h[1] > 0;
+    if (cond === "up3") return h.length >= 3 && h[0] > 0 && h[1] > 0 && h[2] > 0;
+    if (cond === "up3of2") {
+      // 最近3天涨2天：恰好 2 天上涨 + 1 天下跌
+      if (h.length < 3) return false;
+      const up = (h[0] > 0 ? 1 : 0) + (h[1] > 0 ? 1 : 0) + (h[2] > 0 ? 1 : 0);
+      const down = (h[0] < 0 ? 1 : 0) + (h[1] < 0 ? 1 : 0) + (h[2] < 0 ? 1 : 0);
+      return up === 2 && down === 1;
+    }
+    return false;
+  }, []);
+
   // 多维度筛选：强度档位 + 连续流入 + 规模 三个条件 AND 过滤。
   // 选中某个/某几个选项后，下方只展示筛选结果（多条件同时生效）。
   const filteredSectors = useMemo(() => sectorsSorted.filter((r) => {
@@ -506,8 +523,9 @@ export default function App() {
     }
     if (scaleFilter.length && !scaleFilter.includes(r.scale)) return false;
     if (onlyGroup && !groupCodes.includes(r.code)) return false;
+    if (upStreakFilter.length && !upStreakFilter.some((c) => matchUpStreak(r.change_pct_history, c))) return false;
     return true;
-  }), [sectorsSorted, strengthFilter, consecutiveFilter, scaleFilter, onlyGroup, groupCodes]);
+  }), [sectorsSorted, strengthFilter, consecutiveFilter, scaleFilter, onlyGroup, groupCodes, upStreakFilter, matchUpStreak]);
 
   const filteredConcepts = useMemo(() => conceptSectors.filter((r) => {
     if (strengthFilter.length && !strengthFilter.includes(r.strength_level)) return false;
@@ -520,8 +538,9 @@ export default function App() {
     }
     if (scaleFilter.length && !scaleFilter.includes(r.scale)) return false;
     if (onlyGroup && !groupCodes.includes(r.code)) return false;
+    if (upStreakFilter.length && !upStreakFilter.some((c) => matchUpStreak(r.change_pct_history, c))) return false;
     return true;
-  }), [conceptSectors, strengthFilter, consecutiveFilter, scaleFilter, onlyGroup, groupCodes]);
+  }), [conceptSectors, strengthFilter, consecutiveFilter, scaleFilter, onlyGroup, groupCodes, upStreakFilter, matchUpStreak]);
 
   // 表格列定义（useMemo 避免每次渲染重建引用导致 Table 闪烁）
   // watchlist 进 deps：勾选状态变了列渲染要更新；置顶排序在 dataSource 处理
@@ -1101,6 +1120,14 @@ export default function App() {
                       >
                         {onlyGroup ? `只看勾选(${groupCodes.length})` : "只看勾选"}
                       </Button>
+                      <span>连涨：</span>
+                      <Select mode="multiple" allowClear value={upStreakFilter} onChange={setUpStreakFilter}
+                        placeholder="全部" style={{ minWidth: 150 }}
+                        options={[
+                          { value: "up2", label: "连涨2天" },
+                          { value: "up3of2", label: "最近3天涨2天" },
+                          { value: "up3", label: "连涨3天" },
+                        ]} />
                     </Space>
                     <Table
                       rowKey="code"
@@ -1337,6 +1364,14 @@ export default function App() {
                     >
                       {onlyGroup ? `只看勾选(${groupCodes.length})` : "只看勾选"}
                     </Button>
+                    <span>连涨：</span>
+                    <Select mode="multiple" allowClear value={upStreakFilter} onChange={setUpStreakFilter}
+                      placeholder="全部" style={{ minWidth: 150 }}
+                      options={[
+                        { value: "up2", label: "连涨2天" },
+                        { value: "up3of2", label: "最近3天涨2天" },
+                        { value: "up3", label: "连涨3天" },
+                      ]} />
                   </Space>
                   <Table
                     rowKey="code"

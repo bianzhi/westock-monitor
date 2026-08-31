@@ -753,6 +753,39 @@ class Storage:
                     result[d["code"]][d["trade_date"]] = d["change_pct"]
             return result
 
+    def get_change_pct_history(self, codes: List[str], days: int = 6) -> Dict[str, List[float]]:
+        """批量读板块近 N 交易日的涨跌幅序列（从新到旧，用于连涨筛选）。
+
+        Args:
+            codes: 板块代码列表
+            days: 往回取的天数上限
+
+        Returns:
+            {code: [change_pct, ...]}，change_pct 为 % 数值，按 trade_date 倒序
+            （列表首元素为最近一个交易日）
+        """
+        if not codes:
+            return {}
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            placeholders = ",".join("?" * len(codes))
+            cur.execute(
+                f"""SELECT code, trade_date, change_pct
+                    FROM sector_circ_mv
+                    WHERE code IN ({placeholders}) AND change_pct IS NOT NULL
+                    ORDER BY code, trade_date DESC""",
+                codes,
+            )
+            result: Dict[str, List[float]] = {c: [] for c in codes}
+            for row in cur.fetchall():
+                d = dict(row)
+                result[d["code"]].append(d["change_pct"])
+            # 每板块最多保留 days 个
+            for c in result:
+                result[c] = result[c][:days]
+            return result
+
     def get_latest_sector_circ_mv(self) -> Dict[str, Dict]:
         """获取每个板块最新一日的流通市值缓存。
 
