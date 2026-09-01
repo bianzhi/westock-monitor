@@ -59,6 +59,13 @@ MIN_CIRC_RATE = 0.001
 MAX_CIRC_RATE = 50.0
 MAX_SINGLE_STOCK_MV = 5e12
 
+# 板块指数涨跌幅/换手率的合理性阈值（方案 C 腾讯落库前校验）。
+# A 股板块指数单日涨跌幅受成分股涨跌停限制（主板 ±10%、创业板/科创板 ±20%、
+# 北交所 ±30%），不可能超过 ±30%。腾讯接口在盘前（09:15 采集时点）或指数重算时
+# 可能返回脏数据（如昨收异常导致 change_pct=554.67%），需在此过滤。
+MAX_SECTOR_CHANGE_PCT = 30.0       # 板块指数涨跌幅绝对值上限（%）
+MAX_SECTOR_TURNOVER_RATE = 100.0   # 板块指数换手率上限（%）
+
 # Tushare client 单例（延迟初始化，token 从环境变量读）
 _tushare_pro = None
 _tushare_lock = threading.Lock()
@@ -457,11 +464,23 @@ def collect_all_sectors_circ_mv_tencent(stock_map=None) -> Dict[str, Dict]:
         if not q or q.get("circ_mv") is None:
             result[pt_code] = _empty_result(today_str)
             continue
+        # 校验涨跌幅/换手率：腾讯盘前或指数重算时会返回脏数据（如 554.67%），
+        # 超出板块指数合理区间则置 None，避免日线图 K 线尖刺。
+        change_pct = q.get("change_pct")
+        if change_pct is not None and not (-MAX_SECTOR_CHANGE_PCT <= change_pct <= MAX_SECTOR_CHANGE_PCT):
+            logger.warning("collect_all_sectors_circ_mv_tencent: %s 涨跌幅异常 %.2f%%，已置空",
+                           pt_code, change_pct)
+            change_pct = None
+        turnover_rate = q.get("turnover_rate")
+        if turnover_rate is not None and not (0 <= turnover_rate <= MAX_SECTOR_TURNOVER_RATE):
+            logger.warning("collect_all_sectors_circ_mv_tencent: %s 换手率异常 %.2f%%，已置空",
+                           pt_code, turnover_rate)
+            turnover_rate = None
         result[pt_code] = {
             "circ_mv": q.get("circ_mv"),
             "circ_mv_yi": q.get("circ_mv_yi"),
-            "change_pct": q.get("change_pct"),
-            "turnover_rate": q.get("turnover_rate"),
+            "change_pct": change_pct,
+            "turnover_rate": turnover_rate,
             "stock_count": 0,            # 板块指数行情无成分股统计
             "valid_count": 1,
             "skip_count": 0,

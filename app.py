@@ -215,9 +215,11 @@ class LimitUpRow(BaseModel):
     lbt: Optional[str] = None                 # 最后封板时间 HHMMSS
     fund: Optional[float] = None              # 封单资金(元)
     zbc: Optional[int] = None                 # 开板次数
-    hybk: Optional[str] = None                # 所属行业
+    hybk: Optional[str] = None                # 所属行业名称
+    hybk_code: Optional[str] = None           # 所属行业板块代码（跳日线图用）
     zt_days: Optional[int] = None             # 涨停天数
     zt_ct: Optional[int] = None               # 涨停次数
+    concepts: List[Dict[str, str]] = []       # 所属概念 [{code, name}]
 
 
 class LimitUpResponse(BaseModel):
@@ -603,8 +605,104 @@ async def get_limit_up(
     _fields = ("code", "name", "price", "change_pct", "amount", "ltsz",
                "turnover_rate", "lbc", "fbt", "lbt", "fund", "zbc", "hybk",
                "zt_days", "zt_ct")
-    rows = [LimitUpRow(**{k: r.get(k) for k in _fields}) for r in pool]
+
+    # 所属概念：反查个股→概念板块代码，映射为 {code, name}
+    from concept_sectors import get_concept_sectors
+    concept_names = get_concept_sectors()
+    stock_codes = [r.get("code") for r in pool if r.get("code")]
+    concepts_map = storage.get_stock_concepts(stock_codes)
+
+    # 行业名 → 板块代码（二级行业 pt018，跳日线图用）
+    from sectors import get_default_sector_map
+    name_to_l2 = {info.get("name"): code
+                  for code, info in get_default_sector_map().items() if info.get("name")}
+
+    rows = []
+    for r in pool:
+        row = LimitUpRow(**{k: r.get(k) for k in _fields})
+        row.hybk_code = name_to_l2.get(r.get("hybk"))
+        row.concepts = [
+            {"code": c, "name": concept_names.get(c, c)}
+            for c in concepts_map.get(r.get("code"), [])
+        ]
+        rows.append(row)
     return LimitUpResponse(date=trade_date, total=len(rows), pool=rows)
+
+
+@app.get("/api/limit-up/summary")
+async def get_limit_up_summary(
+    date: Optional[str] = Query(None, description="YYYY-MM-DD，默认今天"),
+):
+    """涨停池综合信息（封板率、连板梯队、时间分布、行业分布等宏观指标）。
+
+    数据来自 limit_up_pool 落库表（type: zt=涨停 / zb=炸板 / dt=跌停），
+    封板率 = 涨停家数 / (涨停家数 + 炸板家数)。
+    """
+    storage = get_storage()
+    trade_date = date.replace("-", "") if date else datetime.now().strftime("%Y%m%d")
+
+    zt_pool = storage.get_limit_up_pool(trade_date, "zt")
+    zb_pool = storage.get_limit_up_pool(trade_date, "zb")
+    dt_pool = storage.get_limit_up_pool(trade_date, "dt")
+    zt_n, zb_n, dt_n = len(zt_pool), len(zb_pool), len(dt_pool)
+
+    # 封板率 = 涨停 / (涨停 + 炸板)
+    attempt = zt_n + zb_n
+    seal_rate = round(zt_n / attempt * 100, 2) if attempt else None
+
+    # 最高连板 + 连板梯队
+    max_lbc = max((r.get("lbc") or 0) for r in zt_pool) if zt_pool else 0
+    lbc_dist = []
+    for label, lo, hi in (("首板", 1, 1), ("2板", 2, 2), ("3板", 3, 3),
+                          ("4板", 4, 4), ("5板+", 5, None)):
+        cnt = (sum(1 for r in zt_pool if (r.get("lbc") or 0) >= lo)
+               if hi is None
+               else sum(1 for r in zt_pool if (r.get("lbc") or 0) == lo))
+        lbc_dist.append({"board": label, "count": cnt})
+
+    # 涨停时间分布（按首次涨停时间 fbt，HHMMSS）
+    time_counter: Dict[str, int] = {}
+    for r in zt_pool:
+        fbt = r.get("fbt") or ""
+        hhmm = int(fbt[:4]) if fbt[:4].isdigit() else 0
+        if hhmm and hhmm <= 1000:
+            bucket = "早盘(≤10:00)"
+        elif hhmm and hhmm < 1400:
+            bucket = "午盘(10:00-14:00)"
+        elif hhmm:
+            bucket = "尾盘(≥14:00)"
+        else:
+            bucket = "未知"
+        time_counter[bucket] = time_counter.get(bucket, 0) + 1
+    time_dist = [{"bucket": k, "count": v} for k, v in time_counter.items()]
+
+    # 行业分布 Top8
+    hybk_counter: Dict[str, int] = {}
+    for r in zt_pool:
+        h = r.get("hybk") or "其他"
+        hybk_counter[h] = hybk_counter.get(h, 0) + 1
+    industry_top = sorted(
+        ({"hybk": k, "count": v} for k, v in hybk_counter.items()),
+        key=lambda x: -x["count"],
+    )[:8]
+
+    # 封单资金
+    total_fund = sum(r.get("fund") or 0 for r in zt_pool)
+    avg_fund = round(total_fund / zt_n, 2) if zt_n else None
+
+    return {
+        "trade_date": trade_date,
+        "limit_up_count": zt_n,
+        "zhap_ban_count": zb_n,
+        "limit_down_count": dt_n,
+        "seal_rate": seal_rate,
+        "max_lbc": max_lbc,
+        "lbc_dist": lbc_dist,
+        "time_dist": time_dist,
+        "industry_top": industry_top,
+        "total_fund": total_fund,
+        "avg_fund": avg_fund,
+    }
 
 
 # ============================================================
@@ -1322,6 +1420,7 @@ async def get_sector_daily_history(
             "trade_date": r["trade_date"],
             "net_flow_yi": _to_yi(r.get("net_flow")),
             "turnover_yi": _to_yi(r.get("turnover")),
+            "close_price": r.get("close_price"),
             "change_pct": cp_map.get(r["trade_date"]),
         } for r in recs_sorted]
         # 今日尚未落库且分钟快照有今日数据时，补上今日点（盘中动态更新）
@@ -1333,6 +1432,7 @@ async def get_sector_daily_history(
                     "trade_date": today_td,
                     "net_flow_yi": _to_yi(snap.get("main_net_flow")),
                     "turnover_yi": _to_yi(snap.get("turnover")),
+                    "close_price": None,  # 盘中今日收盘价未定，前端用昨日收盘价+涨跌幅构造
                     "change_pct": today_change_pct.get(code),
                 })
         name = recs[0].get("name") if recs else code

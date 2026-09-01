@@ -179,7 +179,7 @@ export default function App() {
 
   // 日线图（板块日级行情：净流入 + 涨跌幅 + 成交额）
   const [dailyCodes, setDailyCodes] = useState("");      // 手动输入板块代码
-  const [dailyDays, setDailyDays] = useState(30);         // 近 N 交易日
+  const [dailyDays, setDailyDays] = useState(50);         // 近 N 交易日
   const [dailyData, setDailyData] = useState(null);
   const [dailyLoading, setDailyLoading] = useState(false);
 
@@ -1421,6 +1421,13 @@ export default function App() {
                     <Button type="primary" onClick={loadDailyHistory} loading={dailyLoading}>
                       加载
                     </Button>
+                    <Button
+                      onClick={() => gotoMinute(dailyCodes.trim())}
+                      disabled={!dailyCodes.trim()}
+                      title="跳转到该板块的分时图"
+                    >
+                      跳转分时图
+                    </Button>
                   </Space>
                   <DailyChart
                     title="板块日级行情"
@@ -1433,7 +1440,7 @@ export default function App() {
             {
               key: "limit-up",
               label: "涨停池",
-              children: <LimitUpTab />,
+              children: <LimitUpTab gotoDaily={gotoDaily} />,
             },
           ]}
         />

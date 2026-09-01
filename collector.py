@@ -402,7 +402,7 @@ def collect_concept_daily_snapshot() -> Dict[str, Any]:
 
 # 全板块日快照去重标记（每天只存一次，与概念快照独立）
 _sector_daily_snapshot_date: str = ""
-_SECTOR_DAILY_KEEP = 30  # 保留近 30 交易日
+_SECTOR_DAILY_KEEP = 75  # 保留近 50 交易日（约 69 自然日，留余量）
 
 
 def collect_sector_daily_snapshot() -> Dict[str, Any]:
@@ -468,6 +468,7 @@ def collect_sector_daily_snapshot() -> Dict[str, Any]:
             "trade_date": today,
             "net_flow": net,
             "turnover": metrics.get("turnover"),
+            "close_price": metrics.get("close_price"),
         })
 
     if records:
@@ -481,17 +482,24 @@ def collect_sector_daily_snapshot() -> Dict[str, Any]:
     return {"saved": 0, "trade_date": today, "elapsed": round(elapsed, 1)}
 
 
-def backfill_sector_daily(days: int = 10) -> Dict[str, Any]:
-    """回溯填充最近 N 个交易日的日净流入到 sector_daily。
+def backfill_sector_daily(days: int = 50) -> Dict[str, Any]:
+    """回溯填充最近 N 个交易日的日净流入 + 涨跌幅。
+
+    1. 净流入/成交额 → sector_daily（日线图净流入/成交额柱状图数据源）
+    2. 涨跌幅 → sector_circ_mv.change_pct（日线图涨跌幅柱状图数据源）
+
+    涨跌幅来源：腾讯板块指数历史行情不可回溯，用 westock fund_flow 的
+    ClosePrice 相邻交易日差分得到，与腾讯涨跌幅口径一致（实测 8/28=2.88%、
+    8/31=-1.25% 均吻合）。
 
     用于服务刚启动、历史日未落库时补齐日线图数据。
     用 westock fund_flow --date 查每个历史交易日，落库（upsert 按 code+trade_date 去重，幂等）。
 
     Args:
-        days: 回溯交易日数（默认 10，不含今日；今日由 collect_sector_daily_snapshot 落库）
+        days: 回溯交易日数（默认 50，不含今日；今日由 collect_sector_daily_snapshot 落库）
 
     Returns:
-        {"backfilled_days": N, "total_records": M, "trade_dates": [...]}
+        {"backfilled_days": N, "total_records": M, "change_pct_records": K, "trade_dates": [...]}
     """
     from westock import fund_flow as _ff, extract_main_net_flow as _emnf
     from westock_fund_metrics import calc_sector_metrics
@@ -518,11 +526,14 @@ def backfill_sector_daily(days: int = 10) -> Dict[str, Any]:
 
     # 最近 N 个交易日（含今日；盘中是实时值，收盘后 collect_sector_daily_snapshot 会覆盖最终值）
     trading_days = get_last_n_trading_days(days, date.today())
-    history_days = trading_days
+    # 升序遍历（最远的在前），便于涨跌幅相邻交易日差分
+    history_days = list(reversed(trading_days))
 
     l2_map = get_default_sector_map()
     backfilled_dates = []
     total_records = 0
+    # 每个板块每个交易日的收盘价（用于相邻交易日差分算涨跌幅）
+    close_map: Dict[str, Dict[str, float]] = {}
 
     for td in history_days:
         td_str = td.strftime("%Y%m%d")
@@ -546,13 +557,17 @@ def backfill_sector_daily(days: int = 10) -> Dict[str, Any]:
                     or (l2_map.get(code, {}) or {}).get("name")
                     or _gdn(code)
                     or code)
+            close = metrics.get("close_price")
             records.append({
                 "code": code,
                 "name": name,
                 "trade_date": td_str,
                 "net_flow": net,
                 "turnover": metrics.get("turnover"),
+                "close_price": close,
             })
+            if close is not None:
+                close_map.setdefault(code, {})[td_str] = close
 
         if records:
             n = storage.upsert_sector_daily_batch(records)
@@ -560,12 +575,25 @@ def backfill_sector_daily(days: int = 10) -> Dict[str, Any]:
             backfilled_dates.append(td_str)
             logger.info("backfill_sector_daily %s: %d records", td_str, n)
 
+    # 涨跌幅：相邻交易日 ClosePrice 差分落库（只更新 change_pct，不覆盖 circ_mv）
+    change_records = []
+    for code, closes in close_map.items():
+        prev_close = None
+        for td_str in sorted(closes.keys()):
+            close = closes[td_str]
+            if prev_close is not None and prev_close > 0 and close is not None:
+                pct = round((close - prev_close) / prev_close * 100, 2)
+                change_records.append({"code": code, "trade_date": td_str, "change_pct": pct})
+            prev_close = close
+    n_change = storage.upsert_sector_change_pct(change_records)
+
     storage.cleanup_sector_daily(_SECTOR_DAILY_KEEP)
-    logger.info("backfill_sector_daily: done, %d days, %d records",
-                len(backfilled_dates), total_records)
+    logger.info("backfill_sector_daily: done, %d days, %d records, %d change_pct",
+                len(backfilled_dates), total_records, n_change)
     return {
         "backfilled_days": len(backfilled_dates),
         "total_records": total_records,
+        "change_pct_records": n_change,
         "trade_dates": backfilled_dates,
     }
 
@@ -1408,7 +1436,12 @@ def run_circ_mv_loop(force: bool = False) -> None:
 # ============================================================
 # 涨停池 / 板块成分股采集
 # ============================================================
-_LIMIT_UP_URL = "https://push2ex.eastmoney.com/getTopicZTPool"
+# 东方财富涨停/炸板/跌停池接口（zt=涨停封住 / zb=炸板 / dt=跌停）
+_TOPIC_POOL_URLS = {
+    "zt": "https://push2ex.eastmoney.com/getTopicZTPool",
+    "zb": "https://push2ex.eastmoney.com/getTopicZBPool",
+    "dt": "https://push2ex.eastmoney.com/getTopicDTPool",
+}
 
 
 def _add_stock_prefix(code: str) -> str:
@@ -1435,75 +1468,116 @@ def _fmt_zt_time(v: Any) -> Optional[str]:
     return s.zfill(6)
 
 
-def collect_limit_up_pool(trade_date: Optional[str] = None) -> Dict[str, Any]:
-    """采集当日全市场涨停池（东方财富 getTopicZTPool），落库 limit_up_pool。
+def _fetch_topic_pool(pool_type: str, trade_date: str) -> List[Dict]:
+    """采集东方财富涨停/炸板/跌停池，返回带 type 标记的 rows。
 
-    数据源优先级说明：涨停池名单 westock CLI 无法直接获取（changedist 只有家数
-    无名单、quote 已废弃），故走东方财富 HTTP 接口兜底（符合「westock 优先、
-    缺失字段走 HTTP 兜底」原则）。
+    Args:
+        pool_type: zt=涨停(封住) / zb=炸板 / dt=跌停
+        trade_date: YYYYMMDD
+    """
+    import urllib.request
+
+    url = _TOPIC_POOL_URLS[pool_type]
+    full_url = (
+        f"{url}?ut=7eea3edcaed734bea9cbfc24409ed989"
+        f"&dpt=wz.ztzt&Pageindex=0&pagesize=500&sort=fbt%3Aasc&date={trade_date}"
+    )
+    rows: List[Dict] = []
+    req = urllib.request.Request(full_url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    pool = (payload.get("data") or {}).get("pool") or []
+    for item in pool:
+        zdp = _safe_float(item.get("zdp"))
+        # 涨停池口径对齐主流行情软件：北交所 30% 涨停（涨跌幅 > 21%）不计入
+        # 涨停家数（东财 getTopicZTPool 会混入北交所，导致家数多出 3 家）。
+        if pool_type == "zt" and zdp is not None and zdp > 21:
+            continue
+        zttj = item.get("zttj") or {}
+        p = item.get("p")
+        rows.append({
+            "code": _add_stock_prefix(str(item.get("c", ""))),
+            "name": item.get("n"),
+            "trade_date": trade_date,
+            "type": pool_type,
+            "price": (_safe_float(p) / 1000.0) if p is not None else None,
+            "change_pct": zdp,
+            "amount": _safe_float(item.get("amount")),
+            "ltsz": _safe_float(item.get("ltsz")),
+            "turnover_rate": _safe_float(item.get("hs")),
+            "lbc": item.get("lbc"),
+            "fbt": _fmt_zt_time(item.get("fbt")),
+            "lbt": _fmt_zt_time(item.get("lbt")),
+            "fund": _safe_float(item.get("fund")),
+            "zbc": item.get("zbc"),
+            "hybk": item.get("hybk"),
+            "zt_days": zttj.get("days"),
+            "zt_ct": zttj.get("ct"),
+        })
+    return rows
+
+
+def collect_limit_up_pool(trade_date: Optional[str] = None) -> Dict[str, Any]:
+    """采集当日全市场涨停池 + 炸板池 + 跌停池，落库 limit_up_pool。
+
+    数据源优先级说明：涨停/炸板/跌停名单 westock CLI 无法直接获取（changedist
+    只有家数无名单、quote 已废弃），故走东方财富 HTTP 接口兜底（符合「westock
+    优先、缺失字段走 HTTP 兜底」原则）。
 
     Args:
         trade_date: 交易日 YYYYMMDD，默认今天
 
     Returns:
-        {trade_date, count, saved, error?}
+        {trade_date, count, saved, zt, zb, dt, error?}
     """
-    import urllib.request
-
     if trade_date is None:
         trade_date = datetime.now().strftime("%Y%m%d")
 
-    url = (
-        f"{_LIMIT_UP_URL}?ut=7eea3edcaed734bea9cbfc24409ed989"
-        f"&dpt=wz.ztzt&Pageindex=0&pagesize=500&sort=fbt%3Aasc&date={trade_date}"
-    )
     rows: List[Dict] = []
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
-        pool = (payload.get("data") or {}).get("pool") or []
-        for item in pool:
-            zttj = item.get("zttj") or {}
-            p = item.get("p")
-            rows.append({
-                "code": _add_stock_prefix(str(item.get("c", ""))),
-                "name": item.get("n"),
-                "trade_date": trade_date,
-                "price": (_safe_float(p) / 1000.0) if p is not None else None,
-                "change_pct": _safe_float(item.get("zdp")),
-                "amount": _safe_float(item.get("amount")),
-                "ltsz": _safe_float(item.get("ltsz")),
-                "turnover_rate": _safe_float(item.get("hs")),
-                "lbc": item.get("lbc"),
-                "fbt": _fmt_zt_time(item.get("fbt")),
-                "lbt": _fmt_zt_time(item.get("lbt")),
-                "fund": _safe_float(item.get("fund")),
-                "zbc": item.get("zbc"),
-                "hybk": item.get("hybk"),
-                "zt_days": zttj.get("days"),
-                "zt_ct": zttj.get("ct"),
-            })
-    except Exception as e:
-        logger.warning("collect_limit_up_pool error: %s", e)
-        return {"trade_date": trade_date, "count": 0, "saved": 0, "error": str(e)}
+    counts: Dict[str, int] = {}
+    for pool_type in ("zt", "zb", "dt"):
+        try:
+            sub = _fetch_topic_pool(pool_type, trade_date)
+            counts[pool_type] = len(sub)
+            rows.extend(sub)
+        except Exception as e:
+            logger.warning("collect_limit_up_pool %s error: %s", pool_type, e)
+            counts[pool_type] = 0
 
-    saved = get_storage().upsert_limit_up_pool(rows)
-    logger.info("collect_limit_up_pool: %s count=%d saved=%d", trade_date, len(rows), saved)
-    return {"trade_date": trade_date, "count": len(rows), "saved": saved}
+    if not rows:
+        return {"trade_date": trade_date, "count": 0, "saved": 0, **counts}
+
+    storage = get_storage()
+    # 先删后插：涨停池是当日快照，接口口径变化（如北交所剔除）时旧记录
+    # 可能不再返回，INSERT OR REPLACE 不会清理残留，故先按日期删除旧数据。
+    storage.delete_limit_up_pool(trade_date)
+    saved = storage.upsert_limit_up_pool(rows)
+    logger.info("collect_limit_up_pool: %s count=%d saved=%d (%s)",
+                trade_date, len(rows), saved, counts)
+    return {"trade_date": trade_date, "count": len(rows), "saved": saved, **counts}
 
 
 def collect_all_sector_constituents(codes: Optional[List[str]] = None) -> Dict[str, Any]:
     """采集板块成分股（westock sector constituent），落库 sector_constituent。
 
+    默认采集二级行业(pt018) + 概念板块(pt02)，用于「个股→板块」反查
+    （涨停票的所属概念、板块涨停票统计）。
+
     Args:
-        codes: 板块代码列表，默认全量（load_sectors）
+        codes: 板块代码列表，默认全量（二级行业 + 概念板块）
 
     Returns:
         {sectors, stocks, saved}
     """
     if codes is None:
-        codes = get_sector_codes()
+        codes = list(get_sector_codes())
+        # 追加概念板块（pt02），供涨停票「所属概念」反查
+        from concept_sectors import get_default_codes as _gdc
+        seen = set(codes)
+        for c in _gdc():
+            if c not in seen:
+                seen.add(c)
+                codes.append(c)
     if not codes:
         return {"sectors": 0, "stocks": 0, "saved": 0}
 

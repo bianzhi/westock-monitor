@@ -207,6 +207,7 @@ class Storage:
                     trade_date      TEXT NOT NULL,      -- YYYYMMDD
                     net_flow        REAL,               -- 当日主力净流入(元)
                     turnover        REAL,               -- 当日成交额(元)
+                    close_price     REAL,               -- 当日板块指数收盘价（构造日K线用）
                     PRIMARY KEY (code, trade_date)
                 )
             """)
@@ -214,13 +215,20 @@ class Storage:
                 CREATE INDEX IF NOT EXISTS idx_sector_daily_date
                 ON sector_daily(trade_date)
             """)
+            # 旧表无 close_price 列时补列（兼容升级，构造真实 K 线用）
+            try:
+                cur.execute("ALTER TABLE sector_daily ADD COLUMN close_price REAL")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
 
-            # 涨停池表（日级，东方财富 getTopicZTPool 采集）
+            # 涨停池表（日级，东方财富 getTopicZTPool / getTopicZBPool / getTopicDTPool 采集）
+            # type: zt=涨停(封住) / zb=炸板(曾涨停后打开) / dt=跌停
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS limit_up_pool (
                     code            TEXT NOT NULL,      -- 带前缀股票代码 sh600519
                     name            TEXT,
                     trade_date      TEXT NOT NULL,      -- YYYYMMDD
+                    type            TEXT DEFAULT 'zt',  -- zt/zb/dt
                     price           REAL,               -- 涨停价(元)
                     change_pct      REAL,               -- 涨跌幅(%)
                     amount          REAL,               -- 成交额(元)
@@ -242,6 +250,11 @@ class Storage:
                 CREATE INDEX IF NOT EXISTS idx_limit_up_date
                 ON limit_up_pool(trade_date)
             """)
+            # 旧表无 type 列时补列（兼容升级，炸板/跌停池用）
+            try:
+                cur.execute("ALTER TABLE limit_up_pool ADD COLUMN type TEXT DEFAULT 'zt'")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
 
             # 板块成分股表（westock sector constituent 采集，供板块涨停票统计）
             cur.execute("""
@@ -664,6 +677,47 @@ class Storage:
         logger.debug("upsert_sector_circ_mv: %d/%d", count, len(records))
         return count
 
+    def upsert_sector_change_pct(self, records: List[Dict]) -> int:
+        """批量写板块涨跌幅（只更新 change_pct，不覆盖 circ_mv 等字段）。
+
+        用于历史涨跌幅回溯补齐：腾讯板块指数历史行情不可回溯，只能由 westock
+        fund_flow 的 ClosePrice 相邻交易日差分得到涨跌幅。落库时只更新
+        change_pct，避免把已有的流通市值（circ_mv）覆盖成空。
+
+        Args:
+            records: [{code, trade_date(YYYYMMDD), change_pct(%)}, ...]
+
+        Returns:
+            写入行数
+        """
+        if not records:
+            return 0
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            count = 0
+            now_iso = datetime.now().isoformat()
+            for r in records:
+                code = r.get("code")
+                trade_date = r.get("trade_date")
+                if not code or not trade_date:
+                    continue
+                try:
+                    cur.execute("""
+                        INSERT INTO sector_circ_mv
+                            (code, trade_date, change_pct, source, updated_at)
+                        VALUES (?, ?, ?, 'westock_close_diff', ?)
+                        ON CONFLICT(code, trade_date) DO UPDATE SET
+                            change_pct = excluded.change_pct,
+                            updated_at = excluded.updated_at
+                    """, (code, trade_date, r.get("change_pct"), now_iso))
+                    count += 1
+                except sqlite3.Error as e:
+                    logger.warning("upsert_sector_change_pct %s: %s", code, e)
+            conn.commit()
+        logger.info("upsert_sector_change_pct: %d records", count)
+        return count
+
     def get_sector_circ_mv(
         self, code: str, trade_date: Optional[str] = None
     ) -> Optional[Dict]:
@@ -1041,10 +1095,10 @@ class Storage:
                 try:
                     cur.execute(
                         """INSERT OR REPLACE INTO sector_daily
-                           (code, name, trade_date, net_flow, turnover)
-                           VALUES (?, ?, ?, ?, ?)""",
+                           (code, name, trade_date, net_flow, turnover, close_price)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
                         (r["code"], r.get("name"), r["trade_date"],
-                         r.get("net_flow"), r.get("turnover")),
+                         r.get("net_flow"), r.get("turnover"), r.get("close_price")),
                     )
                     count += 1
                 except sqlite3.Error as e:
@@ -1086,7 +1140,7 @@ class Storage:
             cur = conn.cursor()
             placeholders = ",".join("?" * len(codes))
             cur.execute(
-                f"""SELECT code, name, trade_date, net_flow, turnover
+                f"""SELECT code, name, trade_date, net_flow, turnover, close_price
                     FROM sector_daily
                     WHERE code IN ({placeholders})
                     ORDER BY trade_date DESC
@@ -1150,13 +1204,42 @@ class Storage:
     # ============================================================
     # 涨停池 / 板块成分股
     # ============================================================
+    def delete_limit_up_pool(self, trade_date: str, pool_type: Optional[str] = None) -> int:
+        """删除指定交易日（可选指定类型）的涨停池记录，用于采集前「先删后插」。
+
+        涨停池是「当日快照」，次日或接口口径变化时旧记录可能不再存在，
+        INSERT OR REPLACE 不会清理这些残留，故采集前先按日期删除旧数据。
+
+        Args:
+            trade_date: YYYYMMDD
+            pool_type: zt/zb/dt，None 表示删除该日所有类型
+
+        Returns:
+            删除行数
+        """
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            if pool_type:
+                cur.execute(
+                    "DELETE FROM limit_up_pool WHERE trade_date = ? AND type = ?",
+                    (trade_date, pool_type),
+                )
+            else:
+                cur.execute(
+                    "DELETE FROM limit_up_pool WHERE trade_date = ?",
+                    (trade_date,),
+                )
+            conn.commit()
+            return cur.rowcount
+
     def upsert_limit_up_pool(self, rows: List[Dict]) -> int:
         """批量写入涨停池（按 code + trade_date 去重）。
 
         Args:
-            rows: [{code, name, trade_date(YYYYMMDD), price, change_pct, amount,
-                    ltsz, turnover_rate, lbc, fbt, lbt, fund, zbc, hybk,
-                    zt_days, zt_ct}, ...]
+            rows: [{code, name, trade_date(YYYYMMDD), type(zt/zb/dt), price,
+                    change_pct, amount, ltsz, turnover_rate, lbc, fbt, lbt,
+                    fund, zbc, hybk, zt_days, zt_ct}, ...]
 
         Returns:
             写入行数
@@ -1172,12 +1255,12 @@ class Storage:
                 try:
                     cur.execute(
                         """INSERT OR REPLACE INTO limit_up_pool
-                           (code, name, trade_date, price, change_pct, amount,
+                           (code, name, trade_date, type, price, change_pct, amount,
                             ltsz, turnover_rate, lbc, fbt, lbt, fund, zbc, hybk,
                             zt_days, zt_ct, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (r["code"], r.get("name"), r["trade_date"], r.get("price"),
-                         r.get("change_pct"), r.get("amount"), r.get("ltsz"),
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (r["code"], r.get("name"), r["trade_date"], r.get("type", "zt"),
+                         r.get("price"), r.get("change_pct"), r.get("amount"), r.get("ltsz"),
                          r.get("turnover_rate"), r.get("lbc"), r.get("fbt"),
                          r.get("lbt"), r.get("fund"), r.get("zbc"), r.get("hybk"),
                          r.get("zt_days"), r.get("zt_ct"), now),
@@ -1189,16 +1272,19 @@ class Storage:
         logger.info("limit_up_pool: upserted %d records", count)
         return count
 
-    def get_limit_up_pool(self, trade_date: str) -> List[Dict]:
-        """查询指定交易日的涨停池列表（按连板数、封单资金排序）。"""
+    def get_limit_up_pool(self, trade_date: str, pool_type: str = "zt") -> List[Dict]:
+        """查询指定交易日指定类型的池（zt=涨停/zb=炸板/dt=跌停）。
+
+        默认涨停池，按连板数、封单资金排序。
+        """
         with _db_lock:
             conn = self._get_conn()
             cur = conn.cursor()
             cur.execute(
                 """SELECT * FROM limit_up_pool
-                   WHERE trade_date = ?
+                   WHERE trade_date = ? AND type = ?
                    ORDER BY lbc DESC, fund DESC""",
-                (trade_date,),
+                (trade_date, pool_type),
             )
             return [dict(row) for row in cur.fetchall()]
 
@@ -1256,6 +1342,28 @@ class Storage:
                 (sector_code,),
             )
             return [dict(row) for row in cur.fetchall()]
+
+    def get_stock_concepts(self, stock_codes: List[str]) -> Dict[str, List[str]]:
+        """反查个股所属概念板块代码（pt02 前缀），返回 {stock_code: [pt_code, ...]}。
+
+        用于涨停票「所属概念」列；板块名称由 app.py 从 concept_sectors 映射。
+        """
+        if not stock_codes:
+            return {}
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            placeholders = ",".join("?" * len(stock_codes))
+            cur.execute(
+                f"""SELECT stock_code, sector_code
+                    FROM sector_constituent
+                    WHERE stock_code IN ({placeholders}) AND sector_code LIKE 'pt02%'""",
+                stock_codes,
+            )
+            result: Dict[str, List[str]] = {c: [] for c in stock_codes}
+            for row in cur.fetchall():
+                result.setdefault(row["stock_code"], []).append(row["sector_code"])
+            return result
 
     def get_limit_up_by_sector(self, trade_date: str) -> Dict[str, List[Dict]]:
         """按板块聚合当日涨停票（成分股 ∩ 涨停池，一次 JOIN 返回）。

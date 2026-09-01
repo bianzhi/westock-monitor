@@ -160,7 +160,16 @@ def is_trading_day(d: date) -> bool:
         True 表示交易日
     """
     _ensure_initialized()
-    return d.strftime("%Y%m%d") in (_trading_days or set())
+    days = _trading_days or set()
+    ds = d.strftime("%Y%m%d")
+    if ds in days:
+        return True
+    # 兜底：缓存可能过期（未覆盖近期日期）。若请求日期晚于缓存中最新交易日
+    # （即缓存未覆盖到该日）且为工作日，按交易日处理，避免工作日被误判为
+    # 休市导致漏采（曾导致 2026-08-31 周一整日数据漏采）。
+    if days and ds > max(days) and d.weekday() < 5:
+        return True
+    return False
 
 
 def get_last_n_trading_days(n: int, from_date: Optional[date] = None) -> List[date]:

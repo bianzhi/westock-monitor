@@ -178,6 +178,8 @@ class TestEdgeCases:
         monkeypatch.setattr(collector, "fund_flow", _mock_fund_flow_today_only(
             today_net_yi=1, net_5d_yi=5, net_10d_yi=10, net_20d_yi=20
         ))
+        # 隔离真实 sector_daily 落库数据：本测试验证分段差分兜底，不能读真实值
+        monkeypatch.setattr(collector, "get_storage", lambda: _EmptyStorage())
         records = collector.collect_daily_records("pt01801081", n=25)
         # T-20~T-24 应兜底为 seg_10_19 = (20-10)/10 = 1 亿
         for r in records[20:25]:

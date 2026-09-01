@@ -7,13 +7,18 @@ const DOWN_COLOR = "#2ecc71";
 const TURNOVER_COLOR = "#f39c12";
 
 /**
- * 板块日级 K 线主图 + 附图（对齐同花顺布局）：
- *   主图 = 价格 K 线（用 change_pct 反推连续收盘价构造 OHLC，涨红跌绿）
+ * 板块日级行情主图 + 附图（对齐同花顺布局）：
+ *   主图 = 真实价格 K 线（蜡烛图，红涨绿跌）
  *   附图 = 成交额柱状图 + 主力净流入柱状图（涨红跌绿）
- * 说明：腾讯板块指数历史 OHLC 不可回溯，K 线由历史涨跌幅 change_pct 反推
- * 相对收盘价（基准 100），形态为连续蜡烛，涨红跌绿。
+ *
+ * K 线构造：直接用后端落库的收盘价 close_price（sector_daily 表）。
+ *   open = 前一日 close_price，close = 当日 close_price（首日平开）；
+ *   今日盘中 close_price 未定，用「昨日 close_price × (1 + 涨跌幅/100)」补一根。
+ *   不做「相对价格累积反推」——涨跌幅始终直接读落库的 change_pct，
+ *   避免脏数据被累积放大成 554.67% 这类离谱值。
+ *
  * props:
- *   series = [{ code, name, points: [{trade_date, net_flow_yi, turnover_yi, change_pct}, ...] }, ...]
+ *   series = [{ code, name, points: [{trade_date, net_flow_yi, turnover_yi, close_price, change_pct}, ...] }, ...]
  *   title = 标题
  *   height = 图表高度
  */
@@ -29,18 +34,23 @@ export default function DailyChart({ series = [], title = "板块日级行情", 
 
     const dates = s.points.map((p) => p.trade_date);
 
-    // 用 change_pct 反推连续收盘价，构造 K 线 OHLC。
-    // open = 前一日 close（首日基准 100）；close = open × (1 + pct/100)；
-    // high/low 用 open/close 近似（无真实高低点）。
-    let prevClose = 100;
+    // 真实价格 K 线：open = 前一日 close，close = 当日落库 close_price
+    let prevClose = null;
     const kline = s.points.map((p) => {
-      if (p.change_pct == null) return "-"; // 空数据用 "-"，避免 null 导致 candlestick 崩溃
-      const pct = Number(p.change_pct);
-      const open = prevClose;
-      const close = open * (1 + pct / 100);
+      let open, close;
+      if (p.close_price != null) {
+        close = Number(p.close_price);
+        open = prevClose != null ? prevClose : close; // 首日平开
+      } else if (prevClose != null && p.change_pct != null) {
+        // 今日盘中：close_price 未定，用昨日收盘 + 涨跌幅构造
+        open = prevClose;
+        close = prevClose * (1 + Number(p.change_pct) / 100);
+      } else {
+        return "-"; // 无价格且无前值，跳过
+      }
+      prevClose = close;
       const high = Math.max(open, close);
       const low = Math.min(open, close);
-      prevClose = close;
       // ECharts candlestick 数据顺序：[open, close, lowest, highest]
       return [open, close, low, high];
     });
@@ -62,15 +72,13 @@ export default function DailyChart({ series = [], title = "板块日级行情", 
           let html = `<b>${date}</b><br/>`;
           params.forEach((p) => {
             if (p.seriesType === "candlestick") {
-              // K 线 value 为 [open, close, low, high]，展示涨跌幅
-              const arr = Array.isArray(p.value) ? p.value : null;
-              if (!arr || arr[1] == null) return;
-              const open = Number(arr[0]);
-              const close = Number(arr[1]);
-              const pct = open ? ((close - open) / open) * 100 : 0;
-              const color = pct >= 0 ? UP_COLOR : DOWN_COLOR;
+              // 涨跌幅直接读落库 change_pct（不反算）
+              const point = s.points[p.dataIndex];
+              const pct = point ? point.change_pct : null;
+              if (pct == null) return;
+              const color = Number(pct) >= 0 ? UP_COLOR : DOWN_COLOR;
               html += `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:4px;"></span>`;
-              html += `涨跌幅: ${pct.toFixed(2)}%<br/>`;
+              html += `涨跌幅: ${Number(pct) > 0 ? "+" : ""}${Number(pct).toFixed(2)}%<br/>`;
             } else {
               if (p.value == null) return;
               const v = Number(p.value).toFixed(2);
@@ -88,7 +96,7 @@ export default function DailyChart({ series = [], title = "板块日级行情", 
         },
       },
       legend: {
-        data: ["K线(相对价)", "成交额(亿)", "主力净流入(亿)"],
+        data: ["K线", "成交额(亿)", "主力净流入(亿)"],
         top: 30,
         textStyle: { fontSize: 11 },
         itemWidth: 10,
@@ -106,13 +114,13 @@ export default function DailyChart({ series = [], title = "板块日级行情", 
         { type: "category", gridIndex: 2, data: dates, axisLabel: { rotate: 45, fontSize: 10 } },
       ],
       yAxis: [
-        { type: "value", gridIndex: 0, scale: true, name: "价格", splitLine: { lineStyle: { type: "dashed", color: "#e0e0e0" } } },
+        { type: "value", gridIndex: 0, scale: true, name: "指数", splitLine: { lineStyle: { type: "dashed", color: "#e0e0e0" } } },
         { type: "value", gridIndex: 1, name: "成交额(亿)", splitLine: { show: false } },
         { type: "value", gridIndex: 2, name: "净流入(亿)", splitLine: { lineStyle: { type: "dashed", color: "#e0e0e0" } } },
       ],
       series: [
         {
-          name: "K线(相对价)",
+          name: "K线",
           type: "candlestick",
           xAxisIndex: 0,
           yAxisIndex: 0,
