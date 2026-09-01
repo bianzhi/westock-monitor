@@ -232,6 +232,7 @@ class Storage:
                     price           REAL,               -- 涨停价(元)
                     change_pct      REAL,               -- 涨跌幅(%)
                     amount          REAL,               -- 成交额(元)
+                    main_net_inflow REAL,               -- 主力净流入(元)，东财资金流补采
                     ltsz            REAL,               -- 流通市值(元)
                     turnover_rate   REAL,               -- 换手率(%)
                     lbc             INTEGER,            -- 连板数
@@ -253,6 +254,11 @@ class Storage:
             # 旧表无 type 列时补列（兼容升级，炸板/跌停池用）
             try:
                 cur.execute("ALTER TABLE limit_up_pool ADD COLUMN type TEXT DEFAULT 'zt'")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
+            # 旧表无 main_net_inflow 列时补列（主力净流入，东财资金流补采）
+            try:
+                cur.execute("ALTER TABLE limit_up_pool ADD COLUMN main_net_inflow REAL")
             except sqlite3.OperationalError:
                 pass  # 列已存在
 
@@ -1238,8 +1244,8 @@ class Storage:
 
         Args:
             rows: [{code, name, trade_date(YYYYMMDD), type(zt/zb/dt), price,
-                    change_pct, amount, ltsz, turnover_rate, lbc, fbt, lbt,
-                    fund, zbc, hybk, zt_days, zt_ct}, ...]
+                    change_pct, amount, main_net_inflow, ltsz, turnover_rate,
+                    lbc, fbt, lbt, fund, zbc, hybk, zt_days, zt_ct}, ...]
 
         Returns:
             写入行数
@@ -1256,11 +1262,12 @@ class Storage:
                     cur.execute(
                         """INSERT OR REPLACE INTO limit_up_pool
                            (code, name, trade_date, type, price, change_pct, amount,
-                            ltsz, turnover_rate, lbc, fbt, lbt, fund, zbc, hybk,
-                            zt_days, zt_ct, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            main_net_inflow, ltsz, turnover_rate, lbc, fbt, lbt,
+                            fund, zbc, hybk, zt_days, zt_ct, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (r["code"], r.get("name"), r["trade_date"], r.get("type", "zt"),
-                         r.get("price"), r.get("change_pct"), r.get("amount"), r.get("ltsz"),
+                         r.get("price"), r.get("change_pct"), r.get("amount"),
+                         r.get("main_net_inflow"), r.get("ltsz"),
                          r.get("turnover_rate"), r.get("lbc"), r.get("fbt"),
                          r.get("lbt"), r.get("fund"), r.get("zbc"), r.get("hybk"),
                          r.get("zt_days"), r.get("zt_ct"), now),

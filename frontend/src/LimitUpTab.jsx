@@ -52,11 +52,7 @@ export default function LimitUpTab({ gotoDaily }) {
 
   // 连板 + 行业 + 时段筛选后的涨停池
   const filteredPool = pool.filter((r) => {
-    if (lbcFilter != null) {
-      const lbc = r.lbc ?? 0;
-      if (lbcFilter === 5) { if (lbc < 5) return false; }
-      else if (lbc !== lbcFilter) return false;
-    }
+    if (lbcFilter != null && (r.lbc ?? 0) !== lbcFilter) return false;
     if (industryFilter && (r.hybk ?? "") !== industryFilter) return false;
     if (timeFilter && timeBucket(r.fbt) !== timeFilter) return false;
     return true;
@@ -121,12 +117,31 @@ export default function LimitUpTab({ gotoDaily }) {
       render: (v) => (v != null ? (v / 1e8).toFixed(2) : "-"),
     },
     {
+      title: "主力净流入(亿)", dataIndex: "main_net_inflow", key: "main_net_inflow", width: 120,
+      sorter: (a, b) => (a.main_net_inflow ?? 0) - (b.main_net_inflow ?? 0),
+      render: (v) => (v != null ? (
+        <span style={{ color: v > 0 ? "#e74c3c" : v < 0 ? "#2ecc71" : "#95a5a6" }}>
+          {v > 0 ? "+" : ""}{(v / 1e8).toFixed(2)}
+        </span>
+      ) : "-"),
+    },
+    {
+      title: "净额率", dataIndex: "net_rate", key: "net_rate", width: 90,
+      sorter: (a, b) => (a.net_rate ?? 0) - (b.net_rate ?? 0),
+      render: (v) => (v != null ? (
+        <span style={{ color: v > 0 ? "#e74c3c" : v < 0 ? "#2ecc71" : "#95a5a6" }}>
+          {v > 0 ? "+" : ""}{v.toFixed(2)}%
+        </span>
+      ) : "-"),
+    },
+    {
       title: "流通市值(亿)", dataIndex: "ltsz", key: "ltsz", width: 120,
       sorter: (a, b) => (a.ltsz ?? 0) - (b.ltsz ?? 0),
       render: (v) => (v != null ? (v / 1e8).toFixed(2) : "-"),
     },
     {
       title: "所属行业", dataIndex: "hybk", key: "hybk", width: 120, ellipsis: true,
+      sorter: (a, b) => (a.hybk || "").localeCompare(b.hybk || ""),
       render: (v, r) => (v ? (
         r.hybk_code ? (
           <a onClick={() => gotoDaily?.(r.hybk_code)} title="跳转板块日线图">{v}</a>
@@ -207,14 +222,20 @@ export default function LimitUpTab({ gotoDaily }) {
           <Divider style={{ margin: "8px 0" }} />
           <div style={{ marginBottom: 4 }}>
             连板梯队：
-            {summary.lbc_dist.map((d, i) => {
-              const next = summary.lbc_dist[i + 1];
-              const rate = next && d.count > 0 ? (next.count / d.count) * 100 : null;
+            {summary.lbc_dist.map((d) => {
+              const active = lbcFilter === d.n;
               return (
-                <Tag key={d.board} color={d.count > 0 ? "red" : undefined} style={{ marginBottom: 4 }}>
+                <Tag
+                  key={d.board}
+                  color={active ? "red" : undefined}
+                  style={{ marginBottom: 4, cursor: "pointer" }}
+                  onClick={() => setLbcFilter(active ? null : d.n)}
+                >
                   {d.board} {d.count}
-                  {rate != null && (
-                    <span style={{ color: "#f0a020", fontWeight: 600 }}> ↑{rate.toFixed(1)}%</span>
+                  {d.rate != null && (
+                    <span style={{ color: "#f0a020", fontWeight: 600 }}>
+                      ↑{d.rate}% ({d.num}/{d.denom})
+                    </span>
                   )}
                 </Tag>
               );
@@ -271,11 +292,9 @@ export default function LimitUpTab({ gotoDaily }) {
           style={{ width: 130 }}
           options={[
             { value: "all", label: "全部" },
-            { value: 1, label: "首板" },
-            { value: 2, label: "2板" },
-            { value: 3, label: "3板" },
-            { value: 4, label: "4板" },
-            { value: 5, label: "5板+" },
+            ...(summary
+              ? summary.lbc_dist.map((d) => ({ value: d.n, label: d.board }))
+              : []),
           ]}
         />
         {industryFilter && (

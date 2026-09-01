@@ -1547,6 +1547,19 @@ def collect_limit_up_pool(trade_date: Optional[str] = None) -> Dict[str, Any]:
     if not rows:
         return {"trade_date": trade_date, "count": 0, "saved": 0, **counts}
 
+    # 涨停票批量补主力净流入（westock fund flow 个股，涨停池接口不返回该字段）
+    zt_codes = [r["code"] for r in rows if r.get("type") == "zt"]
+    if zt_codes:
+        from westock import fund_flow as _ff, extract_main_net_flow as _emnf
+        inflow_map = {}
+        for rec in _ff(zt_codes, raw=True):
+            code = rec.get("code") or rec.get("SecuCode")
+            if code:
+                inflow_map[code] = _emnf(rec)
+        for r in rows:
+            if r.get("type") == "zt":
+                r["main_net_inflow"] = inflow_map.get(r["code"])
+
     storage = get_storage()
     # 先删后插：涨停池是当日快照，接口口径变化（如北交所剔除）时旧记录
     # 可能不再返回，INSERT OR REPLACE 不会清理残留，故先按日期删除旧数据。
@@ -1611,6 +1624,7 @@ def run_limit_up_loop(force: bool = False) -> None:
     """
     logger.info("=== limit_up loop started (force=%s) ===", force)
     constituent_date = ""
+    close_collected_date = ""  # 收盘后补采标记（涨停池最终数据）
     while True:
         now = datetime.now()
         today_str = now.strftime("%Y%m%d")
@@ -1622,6 +1636,16 @@ def run_limit_up_loop(force: bool = False) -> None:
                 collect_limit_up_pool(today_str)
             except Exception as e:
                 logger.warning("limit_up pool collect error: %s", e)
+
+        # 收盘后补采一次最终涨停池（15:00 后当天第一次）：盘中涨停在收盘前
+        # 可能炸板，盘中采集家数偏多，收盘后重采落库最终数据，供次日连板
+        # 晋级率使用（分母需昨日收盘后的精确涨停家数）。
+        if close_collected_date != today_str and now.hour >= 15 and not trading:
+            try:
+                collect_limit_up_pool(today_str)
+                close_collected_date = today_str
+            except Exception as e:
+                logger.warning("limit_up close collect error: %s", e)
 
         # 成分股每日一次（非交易时段触发，跨日去重；失败下次重试）
         if constituent_date != today_str and (force or not trading):

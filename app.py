@@ -208,6 +208,8 @@ class LimitUpRow(BaseModel):
     price: Optional[float] = None            # 涨停价(元)
     change_pct: Optional[float] = None        # 涨跌幅(%)
     amount: Optional[float] = None            # 成交额(元)
+    main_net_inflow: Optional[float] = None   # 主力净流入(元)
+    net_rate: Optional[float] = None          # 净额率(%) = 主力净流入/成交额
     ltsz: Optional[float] = None              # 流通市值(元)
     turnover_rate: Optional[float] = None     # 换手率(%)
     lbc: Optional[int] = None                 # 连板数
@@ -602,8 +604,8 @@ async def get_limit_up(
     storage = get_storage()
     trade_date = date.replace("-", "") if date else datetime.now().strftime("%Y%m%d")
     pool = storage.get_limit_up_pool(trade_date)
-    _fields = ("code", "name", "price", "change_pct", "amount", "ltsz",
-               "turnover_rate", "lbc", "fbt", "lbt", "fund", "zbc", "hybk",
+    _fields = ("code", "name", "price", "change_pct", "amount", "main_net_inflow",
+               "ltsz", "turnover_rate", "lbc", "fbt", "lbt", "fund", "zbc", "hybk",
                "zt_days", "zt_ct")
 
     # 所属概念：反查个股→概念板块代码，映射为 {code, name}
@@ -625,6 +627,9 @@ async def get_limit_up(
             {"code": c, "name": concept_names.get(c, c)}
             for c in concepts_map.get(r.get("code"), [])
         ]
+        # 净额率(%) = 主力净流入 / 成交额 × 100
+        if row.main_net_inflow is not None and row.amount:
+            row.net_rate = round(row.main_net_inflow / row.amount * 100, 2)
         rows.append(row)
     return LimitUpResponse(date=trade_date, total=len(rows), pool=rows)
 
@@ -650,15 +655,37 @@ async def get_limit_up_summary(
     attempt = zt_n + zb_n
     seal_rate = round(zt_n / attempt * 100, 2) if attempt else None
 
-    # 最高连板 + 连板梯队
-    max_lbc = max((r.get("lbc") or 0) for r in zt_pool) if zt_pool else 0
+    # 今日各板家数（精确到每板，不合并「5板+」）
+    today_lbc_counts: Dict[int, int] = {}
+    for r in zt_pool:
+        lbc = r.get("lbc") or 0
+        today_lbc_counts[lbc] = today_lbc_counts.get(lbc, 0) + 1
+    max_lbc = max(today_lbc_counts.keys()) if today_lbc_counts else 0
+
+    # 昨日（前一交易日）涨停池连板分布，用于晋级率
+    from trading_calendar import get_previous_trading_day
+    prev_lbc_counts: Dict[int, int] = {}
+    prev_td = get_previous_trading_day(datetime.strptime(trade_date, "%Y%m%d").date())
+    if prev_td:
+        for r in storage.get_limit_up_pool(prev_td.strftime("%Y%m%d"), "zt"):
+            lbc = r.get("lbc") or 0
+            prev_lbc_counts[lbc] = prev_lbc_counts.get(lbc, 0) + 1
+
+    # 连板梯队（精确到每板，含时序晋级率：今日 N 板 ÷ 昨日 N-1 板）
     lbc_dist = []
-    for label, lo, hi in (("首板", 1, 1), ("2板", 2, 2), ("3板", 3, 3),
-                          ("4板", 4, 4), ("5板+", 5, None)):
-        cnt = (sum(1 for r in zt_pool if (r.get("lbc") or 0) >= lo)
-               if hi is None
-               else sum(1 for r in zt_pool if (r.get("lbc") or 0) == lo))
-        lbc_dist.append({"board": label, "count": cnt})
+    for board in range(1, max_lbc + 1):
+        cnt = today_lbc_counts.get(board, 0)
+        label = "首板" if board == 1 else f"{board}板"
+        num = denom = None
+        rate = None
+        if board >= 2:
+            num = cnt                                  # 今日 board 板数
+            denom = prev_lbc_counts.get(board - 1, 0)  # 昨日 board-1 板数
+            rate = round(num / denom * 100, 1) if denom else None
+        lbc_dist.append({
+            "board": label, "n": board, "count": cnt,
+            "rate": rate, "num": num, "denom": denom,
+        })
 
     # 涨停时间分布（按首次涨停时间 fbt，HHMMSS）
     time_counter: Dict[str, int] = {}
@@ -676,7 +703,7 @@ async def get_limit_up_summary(
         time_counter[bucket] = time_counter.get(bucket, 0) + 1
     time_dist = [{"bucket": k, "count": v} for k, v in time_counter.items()]
 
-    # 行业分布 Top8
+    # 行业分布（完整展示，加和 = 涨停家数）
     hybk_counter: Dict[str, int] = {}
     for r in zt_pool:
         h = r.get("hybk") or "其他"
@@ -684,7 +711,7 @@ async def get_limit_up_summary(
     industry_top = sorted(
         ({"hybk": k, "count": v} for k, v in hybk_counter.items()),
         key=lambda x: -x["count"],
-    )[:8]
+    )
 
     # 封单资金
     total_fund = sum(r.get("fund") or 0 for r in zt_pool)
