@@ -57,6 +57,10 @@ export const fetchLimitUp = (date) =>
 export const fetchLimitUpSummary = (date) =>
   api.get("/limit-up/summary", { params: { date } }).then((r) => r.data);
 
+// 大盘概况：核心指数 + 市场情绪 + 资金面 + 强弱分布
+export const fetchMarketOverview = () =>
+  api.get("/market-overview").then((r) => r.data);
+
 export const fetchSectorDailyHistory = (codes, days = 30) =>
   api
     .get("/sector-daily-history", { params: { codes, days } })

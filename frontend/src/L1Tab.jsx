@@ -126,6 +126,92 @@ export default function L1Tab({ l1Data, l1Loading, onSwitchToSector, onDrillDown
     },
   ];
 
+  // 二级板块子表列（展开一级行业时显示）
+  const l2Columns = [
+    {
+      title: "二级板块",
+      dataIndex: "name",
+      key: "name",
+      fixed: "left",
+      width: 140,
+      render: (text, record) => (
+        <a onClick={() => onSwitchToSector && onSwitchToSector(record)} title="跳转板块日线图">
+          {text}
+        </a>
+      ),
+    },
+    {
+      title: "净流入(亿)",
+      key: "net",
+      width: 110,
+      sorter: (a, b) => (a.net_flow_yi ?? -1e18) - (b.net_flow_yi ?? -1e18),
+      render: (_, r) => <NetFlowText value={r.net_flow_yi} digits={2} />,
+    },
+    {
+      title: "净额率",
+      key: "rate",
+      width: 90,
+      sorter: (a, b) => (a.net_rate ?? -999) - (b.net_rate ?? -999),
+      render: (_, r) => <NetRateText value={r.net_rate} />,
+    },
+    {
+      title: "涨跌幅",
+      dataIndex: "change_pct",
+      key: "chg",
+      width: 85,
+      sorter: (a, b) => (a.change_pct ?? -999) - (b.change_pct ?? -999),
+      render: (v) => (v != null ? (
+        <span style={{ color: v > 0 ? "#e74c3c" : v < 0 ? "#2ecc71" : "#95a5a6", fontWeight: 600 }}>
+          {v > 0 ? "+" : ""}{v.toFixed(2)}%
+        </span>
+      ) : "-"),
+    },
+    {
+      title: "强度",
+      dataIndex: "strength_level",
+      key: "strength",
+      width: 70,
+      sorter: (a, b) => (a.strength_value ?? 0) - (b.strength_value ?? 0),
+      render: (_, r) => <StrengthTag level={r.strength_level} value={r.strength_value} />,
+    },
+    {
+      title: "流通值(亿)",
+      dataIndex: "circ_mv_yi",
+      key: "mv",
+      width: 110,
+      sorter: (a, b) => (a.circ_mv_yi ?? 0) - (b.circ_mv_yi ?? 0),
+      render: (v) => (v != null ? Number(v).toFixed(0) : "-"),
+    },
+    {
+      title: "连续流入",
+      dataIndex: "consecutive_inflow_days",
+      key: "consec",
+      width: 85,
+      sorter: (a, b) => (a.consecutive_inflow_days ?? 0) - (b.consecutive_inflow_days ?? 0),
+      render: (v) => (v > 0 ? <span style={{ color: "#e74c3c" }}>{v}天</span> : "-"),
+    },
+    {
+      title: "涨停",
+      dataIndex: "limit_up_count",
+      key: "lu",
+      width: 60,
+      sorter: (a, b) => (a.limit_up_count ?? 0) - (b.limit_up_count ?? 0),
+      render: (v) => (v > 0 ? <span style={{ color: "#e74c3c", fontWeight: 600 }}>{v}</span> : "-"),
+    },
+  ];
+
+  // 展开行：渲染该一级行业包含的二级板块子表
+  const expandedRowRender = (record) => (
+    <Table
+      rowKey="code"
+      columns={l2Columns}
+      dataSource={record.sectors || []}
+      size="small"
+      pagination={false}
+      scroll={{ x: 800 }}
+    />
+  );
+
   return (
     <>
       <Row gutter={16} style={{ marginBottom: 16 }}>
@@ -171,6 +257,10 @@ export default function L1Tab({ l1Data, l1Loading, onSwitchToSector, onDrillDown
           loading={l1Loading}
           size="small"
           scroll={{ x: 1100 }}
+          expandable={{
+            expandedRowRender,
+            rowExpandable: (r) => (r.sectors || []).length > 0,
+          }}
           pagination={{
             pageSize: 31,
             showSizeChanger: true,

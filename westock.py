@@ -218,6 +218,52 @@ def fund_flow(codes: Union[str, List[str]], raw: bool = True, asof_date: Optiona
     return results
 
 
+def kline(codes: Union[str, List[str]], limit: int = 25, raw: bool = True) -> Dict[str, List[Dict]]:
+    """批量查指数/个股日K线（含真实成交额 amount）。
+
+    返回 {code: [bars]}，每根 bar 含 date/open/close/high/low/volume/amount。
+    close 映射自 westock 的 last（收盘价）；amount 单位元（真实成交额）。
+    返回按日期升序（最后一根为最新交易日），与 tencent_quote.fetch_index_daily 一致。
+
+    Args:
+        codes: 单个代码或列表（如 sh000001 / sz399001，支持指数）
+        limit: 近 N 个交易日
+    """
+    if isinstance(codes, str):
+        codes = [codes]
+    if not codes:
+        return {}
+
+    data = westock("kline", ",".join(codes), "--limit", str(limit), raw=raw)
+    # 兼容 BatchResult {status, data[], errors[]} 结构
+    if isinstance(data, dict) and "data" in data:
+        data = data["data"]
+    if not isinstance(data, list):
+        return {c: [] for c in codes}
+
+    single = len(codes) == 1
+    result: Dict[str, List[Dict]] = {c: [] for c in codes}
+    for r in data:
+        sym = r.get("symbol") or (codes[0] if single else None)
+        if not sym:
+            continue
+        if sym not in result:
+            result[sym] = []
+        result[sym].append({
+            "date": r.get("date"),
+            "open": r.get("open"),
+            "close": r.get("last"),          # westock 用 last 表示收盘价
+            "high": r.get("high"),
+            "low": r.get("low"),
+            "volume": r.get("volume"),
+            "amount": r.get("amount"),        # 成交额(元)，真实值
+        })
+    # westock 返回倒序（最新在前），翻转为升序
+    for c in result:
+        result[c] = list(reversed(result[c]))
+    return result
+
+
 def sector_ranking(raw: bool = True) -> Dict:
     """全市场板块行情榜。
 

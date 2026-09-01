@@ -258,6 +258,7 @@ class L1SummaryRow(BaseModel):
     strong_count: int = 0
     weak_count: int = 0
     top_sectors: List[Dict[str, Any]] = []     # 强度最高 3 个二级板块
+    sectors: List[Dict[str, Any]] = []         # 全量二级板块（展开折叠用）
 
 
 class L1SummaryResponse(BaseModel):
@@ -634,17 +635,14 @@ async def get_limit_up(
     return LimitUpResponse(date=trade_date, total=len(rows), pool=rows)
 
 
-@app.get("/api/limit-up/summary")
-async def get_limit_up_summary(
-    date: Optional[str] = Query(None, description="YYYY-MM-DD，默认今天"),
-):
+def _build_limit_up_summary(trade_date: str) -> Dict[str, Any]:
     """涨停池综合信息（封板率、连板梯队、时间分布、行业分布等宏观指标）。
 
     数据来自 limit_up_pool 落库表（type: zt=涨停 / zb=炸板 / dt=跌停），
     封板率 = 涨停家数 / (涨停家数 + 炸板家数)。
+    抽成独立 helper 供 /api/limit-up/summary 与 /api/market-overview 复用。
     """
     storage = get_storage()
-    trade_date = date.replace("-", "") if date else datetime.now().strftime("%Y%m%d")
 
     zt_pool = storage.get_limit_up_pool(trade_date, "zt")
     zb_pool = storage.get_limit_up_pool(trade_date, "zb")
@@ -729,6 +727,339 @@ async def get_limit_up_summary(
         "industry_top": industry_top,
         "total_fund": total_fund,
         "avg_fund": avg_fund,
+    }
+
+
+@app.get("/api/limit-up/summary")
+async def get_limit_up_summary(
+    date: Optional[str] = Query(None, description="YYYY-MM-DD，默认今天"),
+):
+    """涨停池综合信息（封板率、连板梯队、时间分布、行业分布等宏观指标）。"""
+    trade_date = date.replace("-", "") if date else datetime.now().strftime("%Y%m%d")
+    return _build_limit_up_summary(trade_date)
+
+
+# ============================================================
+# 大盘概况：核心指数 + 市场情绪 + 资金面 + 强弱分布
+# ============================================================
+# 指数行情进程内缓存（腾讯接口免费但不宜高频打爆，交易时段 5s 一刷足够）
+_index_cache: Dict[str, Any] = {"ts": 0.0, "data": []}
+_index_cache_lock = threading.Lock()
+INDEX_CACHE_TTL_SEC = 5.0
+
+
+def _get_indices() -> List[Dict[str, Any]]:
+    """拉取核心指数行情（带 5s 进程内缓存，失败回退上次缓存）。"""
+    with _index_cache_lock:
+        now = time.time()
+        if now - _index_cache["ts"] < INDEX_CACHE_TTL_SEC and _index_cache["data"]:
+            return _index_cache["data"]
+    try:
+        from tencent_quote import fetch_index_quotes
+        data = fetch_index_quotes()
+        if data:
+            with _index_cache_lock:
+                _index_cache["ts"] = time.time()
+                _index_cache["data"] = data
+            return data
+    except Exception as e:
+        logger.warning("fetch_index_quotes failed: %s", e)
+    with _index_cache_lock:
+        return _index_cache["data"]  # 兜底：返回上次成功缓存
+
+
+# 涨跌家数进程内缓存（东财接口同样不宜高频打爆，交易时段 5s 一刷）
+_breadth_cache: Dict[str, Any] = {"ts": 0.0, "data": {}}
+_breadth_cache_lock = threading.Lock()
+
+
+def _get_market_breadth() -> Dict[str, Any]:
+    """拉取全市场涨跌家数（带 5s 进程内缓存，失败回退上次缓存）。"""
+    with _breadth_cache_lock:
+        now = time.time()
+        if now - _breadth_cache["ts"] < INDEX_CACHE_TTL_SEC and _breadth_cache["data"]:
+            return _breadth_cache["data"]
+    try:
+        from collector import fetch_market_breadth
+        data = fetch_market_breadth()
+        if data:
+            with _breadth_cache_lock:
+                _breadth_cache["ts"] = time.time()
+                _breadth_cache["data"] = data
+            return data
+    except Exception as e:
+        logger.warning("fetch_market_breadth failed: %s", e)
+    with _breadth_cache_lock:
+        return _breadth_cache["data"]  # 兜底：返回上次成功缓存
+
+
+# 指数日K进程内缓存（量能/均线数据源；日K变化慢，30s 一刷足够）
+_index_daily_cache: Dict[str, Any] = {"ts": 0.0, "data": {}}
+_index_daily_lock = threading.Lock()
+INDEX_DAILY_TTL_SEC = 30.0
+
+
+def _get_index_daily() -> Dict[str, List[Dict]]:
+    """拉取核心指数日K（带 30s 进程内缓存，失败回退上次缓存）。"""
+    with _index_daily_lock:
+        now = time.time()
+        if now - _index_daily_cache["ts"] < INDEX_DAILY_TTL_SEC and _index_daily_cache["data"]:
+            return _index_daily_cache["data"]
+    try:
+        from tencent_quote import fetch_index_daily, INDEX_CODES
+        codes = [c for c, _ in INDEX_CODES]
+        data = fetch_index_daily(codes, n=25)
+        if data:
+            with _index_daily_lock:
+                _index_daily_cache["ts"] = time.time()
+                _index_daily_cache["data"] = data
+            return data
+    except Exception as e:
+        logger.warning("fetch_index_daily failed: %s", e)
+    with _index_daily_lock:
+        return _index_daily_cache["data"]  # 兜底：返回上次成功缓存
+
+
+# 指数成交额进程内缓存（westock kline 真实 amount；30s 一刷）
+_index_amount_cache: Dict[str, Any] = {"ts": 0.0, "data": {}}
+_index_amount_lock = threading.Lock()
+
+
+def _get_index_amount() -> Dict[str, List[float]]:
+    """拉取上证/深证真实成交额序列（westock kline 的 amount，30s 缓存）。
+
+    返回 {code: [amount_yi]}（亿元，升序，最后一根为最新交易日）。
+    """
+    with _index_amount_lock:
+        now = time.time()
+        if now - _index_amount_cache["ts"] < INDEX_DAILY_TTL_SEC and _index_amount_cache["data"]:
+            return _index_amount_cache["data"]
+    try:
+        from westock import kline
+        data = kline(["sh000001", "sz399001"], limit=6)
+        result: Dict[str, List[float]] = {}
+        for code, bars in data.items():
+            result[code] = [round(b["amount"] / 1e8, 2) for b in bars if b.get("amount") is not None]
+        if result:
+            with _index_amount_lock:
+                _index_amount_cache["ts"] = time.time()
+                _index_amount_cache["data"] = result
+            return result
+    except Exception as e:
+        logger.warning("_get_index_amount failed: %s", e)
+    with _index_amount_lock:
+        return _index_amount_cache["data"]  # 兜底：返回上次成功缓存
+
+
+def _build_volume_ma(indices: List[Dict], daily_map: Dict[str, List[Dict]],
+                     amount_map: Dict[str, List[float]]) -> Dict[str, Any]:
+    """计算量能（放量/缩量 + 量价信号）与各指数均线位置。
+
+    量能以成交额（金额，亿元）口径，全部取真实值：
+    - 今日成交额来自实时接口 amount_yi；
+    - 昨日/5日均成交额来自 westock kline 的 amount 字段（真实历史成交额）。
+    「价」方向以上证指数涨跌幅代表大盘方向，组合出量价四象限信号。
+    """
+    # 今日成交额（亿元，真实值来自实时接口 amount_yi）
+    sh_amount_yi = next((i.get("amount_yi") for i in indices if i.get("code") == "sh000001"), None)
+    sz_amount_yi = next((i.get("amount_yi") for i in indices if i.get("code") == "sz399001"), None)
+
+    # 真实历史成交额序列（亿元，来自 westock kline 的 amount 字段）
+    sh_amounts = amount_map.get("sh000001", [])
+    sz_amounts = amount_map.get("sz399001", [])
+
+    today_amount = prev_amount = avg5_amount = None
+    volume_ratio = None
+    if sh_amount_yi is not None and sz_amount_yi is not None:
+        today_amount = round(sh_amount_yi + sz_amount_yi, 2)
+    if len(sh_amounts) >= 6 and len(sz_amounts) >= 6:
+        prev_amount = round(sh_amounts[-2] + sz_amounts[-2], 2)
+        avg5_amount = round(sum(sh_amounts[-6:-1]) / 5 + sum(sz_amounts[-6:-1]) / 5, 2)
+        volume_ratio = round(today_amount / avg5_amount, 2) if avg5_amount else None
+
+    # 放量/缩量判定（量比阈值：≥1.1 放量，≤0.9 缩量）
+    if volume_ratio is None:
+        volume_label = None
+    elif volume_ratio >= 1.1:
+        volume_label = "放量"
+    elif volume_ratio <= 0.9:
+        volume_label = "缩量"
+    else:
+        volume_label = "平量"
+
+    # 价方向（上证指数涨跌幅）
+    sh_chg = next((i.get("change_pct") for i in indices if i.get("code") == "sh000001"), None)
+    if sh_chg is None:
+        price_label = None
+    elif sh_chg > 0.1:
+        price_label = "上涨"
+    elif sh_chg < -0.1:
+        price_label = "下跌"
+    else:
+        price_label = "平盘"
+
+    # 量价信号
+    signal = None
+    if volume_label and price_label:
+        if volume_label == "放量" and price_label == "上涨":
+            signal = "放量上涨·量价齐升"
+        elif volume_label == "放量" and price_label == "下跌":
+            signal = "放量下跌·警惕出货"
+        elif volume_label == "缩量" and price_label == "上涨":
+            signal = "缩量上涨·动能不足"
+        elif volume_label == "缩量" and price_label == "下跌":
+            signal = "缩量下跌·抛压减轻"
+        else:
+            signal = f"{volume_label}{price_label}"
+
+    # 各指数均线位置（MA5 / MA20，收盘价）
+    index_ma = []
+    for idx in indices:
+        code = idx.get("code")
+        bars = daily_map.get(code, [])
+        closes = [b.get("close") for b in bars if b.get("close") is not None]
+        ma5 = round(sum(closes[-5:]) / 5, 2) if len(closes) >= 5 else None
+        ma20 = round(sum(closes[-20:]) / 20, 2) if len(closes) >= 20 else None
+        price = idx.get("price")
+        index_ma.append({
+            "code": code, "name": idx.get("name"),
+            "price": price, "ma5": ma5, "ma20": ma20,
+            "above_ma5": (price > ma5) if (price is not None and ma5 is not None) else None,
+            "above_ma20": (price > ma20) if (price is not None and ma20 is not None) else None,
+        })
+
+    return {
+        "today_amount_yi": today_amount,
+        "prev_amount_yi": prev_amount,
+        "avg5_amount_yi": avg5_amount,
+        "volume_ratio": volume_ratio,
+        "volume_label": volume_label,
+        "price_label": price_label,
+        "signal": signal,
+        "index_ma": index_ma,
+    }
+
+
+def _build_market_flow() -> tuple:
+    """从缓存聚合一级行业资金净流入/净流出 Top + 全市场强弱分布。
+
+    直接读 data_cache（<5ms），不调用 get_sectors，避免重复计算宽表。
+    """
+    if not is_ready():
+        return (
+            {"inflow_top": [], "outflow_top": [], "main_net_inflow_yi": None},
+            {"strong": 0, "pian_qiang": 0, "normal": 0, "pian_ruo": 0, "weak": 0},
+        )
+
+    _ensure_meta()
+    sector_list = cache_get_sectors()
+    daily_map = get_daily_map()
+    circ_mv_map = get_circ_mv_map()
+
+    # 一级行业聚合 + 全市场强弱计数
+    groups: Dict[str, Dict[str, Any]] = {}
+    strength_dist = {"强": 0, "偏强": 0, "普通": 0, "偏弱": 0, "弱": 0}
+    total_net_all = 0.0
+    for sec in sector_list:
+        code = sec["code"]
+        l1 = sec.get("l1") or "其他"
+        records = daily_map.get(code, [])
+        today_rec = records[0] if records else {}
+        today_net = today_rec.get("net_flow")
+        today_turnover = today_rec.get("turnover")
+        circ_mv_yi = circ_mv_map.get(code)
+
+        strength = _calc_strength_from_records(records, circ_mv_yi, STRENGTH_WINDOW_N)
+        lv = strength["level"]
+        if lv in strength_dist:
+            strength_dist[lv] += 1
+
+        g = groups.setdefault(l1, {"net": 0.0, "turnover": 0.0, "count": 0, "has_net": False})
+        g["count"] += 1
+        if today_net is not None:
+            g["net"] += today_net
+            g["has_net"] = True
+            total_net_all += today_net
+        if today_turnover is not None:
+            g["turnover"] += today_turnover
+
+    rows = []
+    for l1_name, g in groups.items():
+        net_yi = _to_yi(g["net"]) if g["has_net"] else None
+        net_rate = _net_rate(g["net"], g["turnover"]) if (g["has_net"] and g["turnover"]) else None
+        rows.append({
+            "l1_name": l1_name,
+            "total_net_flow_yi": net_yi,
+            "net_rate": net_rate,
+            "sector_count": g["count"],
+        })
+    # 净流入排行（降序），净流出排行（升序，最负在前）
+    rows.sort(key=lambda r: (r["total_net_flow_yi"] is not None, r["total_net_flow_yi"] or 0), reverse=True)
+    inflow_top = [r for r in rows if (r["total_net_flow_yi"] or 0) > 0][:8]
+    outflow_top = sorted(
+        [r for r in rows if (r["total_net_flow_yi"] or 0) < 0],
+        key=lambda r: r["total_net_flow_yi"],
+    )[:8]
+
+    breadth = {
+        "strong": strength_dist["强"],
+        "pian_qiang": strength_dist["偏强"],
+        "normal": strength_dist["普通"],
+        "pian_ruo": strength_dist["偏弱"],
+        "weak": strength_dist["弱"],
+        "strong_count": strength_dist["强"],
+        "weak_count": strength_dist["弱"],
+    }
+    return {
+        "inflow_top": inflow_top,
+        "outflow_top": outflow_top,
+        "main_net_inflow_yi": _to_yi(total_net_all),
+    }, breadth
+
+
+@app.get("/api/market-overview")
+async def get_market_overview():
+    """大盘概况：核心指数 + 量能(放量/缩量) + 指数均线 + 涨跌家数 + 情绪 + 资金面 + 强弱分布。
+
+    一次请求聚合七块数据，前端「大盘概况」页零散请求。
+    """
+    trade_date = datetime.now().strftime("%Y%m%d")
+
+    # 1. 核心指数
+    indices = _get_indices()
+    sh_amount = next((i["amount_yi"] for i in indices if i["code"] == "sh000001"), None)
+    sz_amount = next((i["amount_yi"] for i in indices if i["code"] == "sz399001"), None)
+    total_amount_yi = None
+    if sh_amount is not None or sz_amount is not None:
+        total_amount_yi = round((sh_amount or 0) + (sz_amount or 0), 2)
+
+    # 2. 量能（放量/缩量 + 量价信号）与指数均线位置
+    daily_map = _get_index_daily()
+    amount_map = _get_index_amount()
+    vol_ma = _build_volume_ma(indices, daily_map, amount_map)
+    index_ma = vol_ma.pop("index_ma", [])
+
+    # 3. 市场涨跌家数（涨跌分布，东财）
+    market_breadth = _get_market_breadth()
+
+    # 4. 市场情绪（涨停池综合信息）
+    sentiment = _build_limit_up_summary(trade_date)
+
+    # 5. 资金面 + 强弱分布（含全市场主力净流入）
+    fund_flow, breadth = _build_market_flow()
+
+    return {
+        "trade_date": trade_date,
+        "last_update": datetime.now().isoformat(),
+        "trading": is_trading_time(),
+        "indices": indices,
+        "total_amount_yi": total_amount_yi,
+        "volume": vol_ma,
+        "index_ma": index_ma,
+        "market_breadth": market_breadth,
+        "sentiment": sentiment,
+        "fund_flow": fund_flow,
+        "breadth": breadth,
     }
 
 
@@ -1071,9 +1402,14 @@ async def get_l1_summary(
         raise HTTPException(status_code=503, detail="cache warming up")
 
     _ensure_meta()
+    storage = get_storage()
     sector_list = cache_get_sectors()
     daily_map = get_daily_map()
     circ_mv_map = get_circ_mv_map()
+    # 流通市值明细（含涨跌幅/换手率）+ 日内涨停票，供二级板块展开行展示
+    circ_mv_detail = storage.get_latest_sector_circ_mv()
+    limit_up_date = date.today().strftime("%Y%m%d")
+    limit_up_by_sector = storage.get_limit_up_by_sector(limit_up_date)
 
     # 按 l1 分组，聚合 today_net / today_turnover / strength
     from collections import OrderedDict
@@ -1088,6 +1424,18 @@ async def get_l1_summary(
         circ_mv_yi = circ_mv_map.get(code)
         scale = get_scale(circ_mv_yi) if circ_mv_yi else "小盘"
         strength = _calc_strength_from_records(records, circ_mv_yi, n)
+        # 涨跌幅（方案 C 腾讯落库）
+        change_pct = circ_mv_detail.get(code, {}).get("change_pct")
+        # 连续净流入天数（从最新往前数连续 net_flow > 0）
+        consecutive_days = 0
+        for _r in records:
+            _nf = _r.get("net_flow")
+            if _nf is not None and _nf > 0:
+                consecutive_days += 1
+            else:
+                break
+        # 日内涨停票数
+        limit_up_count = len(limit_up_by_sector.get(code, []))
         groups.setdefault(l1, []).append({
             "code": code,
             "name": sec.get("name", ""),
@@ -1097,6 +1445,9 @@ async def get_l1_summary(
             "circ_mv_yi": circ_mv_yi,
             "strength_value": strength["value"],
             "strength_level": strength["level"],
+            "change_pct": change_pct,
+            "consecutive_inflow_days": consecutive_days,
+            "limit_up_count": limit_up_count,
         })
 
     summaries = []
@@ -1119,6 +1470,18 @@ async def get_l1_summary(
         top3 = [{"code": s["code"], "name": s["name"], "net_rate": s["net_rate"],
                  "strength_level": s["strength_level"], "strength_value": s["strength_value"]}
                 for s in sorted_group[:3]]
+        # 全量二级板块（展开折叠用），按强度值降序
+        sectors = [{
+            "code": s["code"], "name": s["name"],
+            "net_flow_yi": _to_yi(s["today_net"]),
+            "net_rate": s["net_rate"],
+            "change_pct": s["change_pct"],
+            "circ_mv_yi": s["circ_mv_yi"],
+            "strength_value": s["strength_value"],
+            "strength_level": s["strength_level"],
+            "consecutive_inflow_days": s["consecutive_inflow_days"],
+            "limit_up_count": s["limit_up_count"],
+        } for s in sorted_group]
 
         summaries.append(L1SummaryRow(
             l1_name=l1_name, sector_count=count,
@@ -1126,7 +1489,7 @@ async def get_l1_summary(
             total_turnover_yi=_to_yi(total_turnover), net_rate=net_rate,
             avg_strength_value=round(avg_strength, 3), strength_distribution=dist,
             strong_count=dist.get("强", 0), weak_count=dist.get("弱", 0),
-            top_sectors=top3,
+            top_sectors=top3, sectors=sectors,
         ))
 
     summaries.sort(key=lambda s: s.avg_strength_value, reverse=True)

@@ -47,6 +47,22 @@ IDX_CHANGE_PCT = 32
 IDX_TURNOVER_RATE = 38
 IDX_CIRC_MV_YI = 44
 IDX_TOTAL_MV_YI = 45
+IDX_CHANGE_AMOUNT = 31   # 涨跌额（指数）
+IDX_AMOUNT_WAN = 37      # 成交额(万元)（指数）
+
+# 核心指数清单（大盘概况页数据源）
+# 实测（2026-09-01）腾讯 qt.gtimg.cn 对指数代码返回点位(3)/昨收(4)/
+# 涨跌额(31)/涨跌幅(32)/成交额万元(37)，其中 37 单位万元。
+INDEX_CODES = [
+    ("sh000001", "上证指数"),
+    ("sz399001", "深证成指"),
+    ("sz399006", "创业板指"),
+    ("sh000300", "沪深300"),
+    ("sh000905", "中证500"),
+    ("sh000852", "中证1000"),
+    ("sh000688", "科创50"),
+    ("bj899050", "北证50"),
+]
 
 YI_TO_YUAN = 1e8  # 亿元 → 元
 
@@ -101,6 +117,8 @@ def _parse_quote_line(text: str) -> Optional[Dict]:
             "total_mv_yi": total_mv_yi,              # 亿元
             "circ_mv": circ_mv_yi * YI_TO_YUAN if circ_mv_yi is not None else None,   # 元
             "total_mv": total_mv_yi * YI_TO_YUAN if total_mv_yi is not None else None,
+            "change_amount": _f(IDX_CHANGE_AMOUNT),  # 涨跌额（指数 f31）
+            "amount_wan": _f(IDX_AMOUNT_WAN),        # 成交额万元（指数 f37）
         }
     except Exception as e:
         logger.debug("parse_quote_line error: %s | text[:80]=%s", e, text[:80])
@@ -224,6 +242,114 @@ def aggregate_sector_metrics(quotes: Dict[str, Dict], stock_codes: List[str]) ->
         "valid_count": valid_count,
         "fail_rate": round(1 - valid_count / len(stock_codes), 4) if stock_codes else 1.0,
     }
+
+
+def fetch_index_quotes(codes: Optional[List] = None) -> List[Dict]:
+    """查询核心指数实时行情（点位/涨跌幅/涨跌额/成交额）。
+
+    Args:
+        codes: 可选，[(code, name), ...] 覆盖默认 INDEX_CODES；
+               或 [code, ...] 字符串列表（名称回退用 code）。
+
+    Returns:
+        [{code, name, price, prev_close, change_pct, change_amount, amount_yi}]
+        按传入顺序；查询失败的指数会被跳过。amount_yi 单位亿元。
+    """
+    specs = codes or INDEX_CODES
+    if specs and isinstance(specs[0], str):
+        specs = [(c, c) for c in specs]
+
+    code_list = [c for c, _ in specs]
+    quotes = fetch_stock_quotes(code_list)
+
+    result = []
+    for code, name in specs:
+        q = quotes.get(code)
+        if not q:
+            continue
+        amount_wan = q.get("amount_wan")
+        result.append({
+            "code": code,
+            "name": q.get("name") or name,
+            "price": q.get("price"),
+            "prev_close": q.get("prev_close"),
+            "change_pct": q.get("change_pct"),
+            "change_amount": q.get("change_amount"),
+            "amount_yi": round(amount_wan / 10000, 2) if amount_wan is not None else None,
+        })
+    return result
+
+
+# 腾讯指数日K接口（量能/均线数据源）
+TENCENT_KLINE_URL = "http://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+
+
+def _to_float(v) -> Optional[float]:
+    """字符串 → float，空值/非法值返回 None。"""
+    if v is None or v == "" or v == "-":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch_index_daily_batch(code: str, n: int) -> List[Dict]:
+    """拉取单个指数近 n 个交易日日K（腾讯 fqkline 接口）。
+
+    返回 [{date, open, close, high, low, volume}]（升序，最后一根为最新交易日），
+    volume 单位为手。
+    """
+    import urllib.request
+    import json
+
+    url = f"{TENCENT_KLINE_URL}?param={code},day,,,{n},qfq"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=TENCENT_TIMEOUT) as resp:
+        raw = resp.read()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("gbk", errors="replace")
+
+    payload = json.loads(text)
+    node = (payload.get("data") or {}).get(code) or {}
+    day = node.get("day") or node.get("qfqday") or []
+    result = []
+    for row in day:
+        if len(row) < 6:
+            continue
+        result.append({
+            "date": row[0],
+            "open": _to_float(row[1]),
+            "close": _to_float(row[2]),
+            "high": _to_float(row[3]),
+            "low": _to_float(row[4]),
+            "volume": _to_float(row[5]),   # 手
+        })
+    return result
+
+
+def fetch_index_daily(codes, n: int = 25) -> Dict[str, List[Dict]]:
+    """批量查询多个指数的日K（并发），返回 {code: [bars]}。
+
+    查询失败/无数据的 code 对应空列表。
+    """
+    if isinstance(codes, str):
+        codes = [codes]
+    codes = list(dict.fromkeys(codes))
+
+    merged: Dict[str, List[Dict]] = {}
+    with ThreadPoolExecutor(max_workers=TENCENT_WORKERS) as pool:
+        futures = {pool.submit(_fetch_index_daily_batch, c, n): c for c in codes}
+        for f in as_completed(futures):
+            c = futures[f]
+            try:
+                merged[c] = f.result()
+            except Exception as e:
+                logger.warning("fetch_index_daily failed for %s: %s", c, e)
+                merged[c] = []
+    return merged
 
 
 if __name__ == "__main__":

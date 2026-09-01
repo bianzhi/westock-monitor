@@ -22,6 +22,7 @@ import CompareChart from "./CompareChart";
 import DailyChart from "./DailyChart";
 import AlertsTab from "./AlertsTab";
 import LimitUpTab from "./LimitUpTab";
+import MarketOverview from "./MarketOverview";
 import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect, fetchUserPrefs, saveUserPrefs, fetchConceptSectors, fetchConceptSectorsHistory, fetchSectorsHistory, fetchErrors, fetchWatchlist, addWatchlist, removeWatchlist, refreshConcepts, fetchSectorDailyHistory } from "./api";
 import AuthGuard from "./components/AuthGuard";
 
@@ -1029,6 +1030,11 @@ export default function App() {
           activeKey={activeTab}
           onChange={setActiveTab}
           items={[
+            {
+              key: "market",
+              label: "大盘概况",
+              children: <MarketOverview />,
+            },
             {
               key: "l2",
               label: `二级板块 (${sectors.length})`,

@@ -1517,6 +1517,60 @@ def _fetch_topic_pool(pool_type: str, trade_date: str) -> List[Dict]:
     return rows
 
 
+# 全市场涨跌家数（东方财富涨跌分布 getTopicZDFenBu）
+_BREADTH_URL = "https://push2ex.eastmoney.com/getTopicZDFenBu"
+_BREADTH_UT = "7eea3edcaed734bea9cbfc24409ed989"
+
+
+def fetch_market_breadth() -> Dict[str, Any]:
+    """查询全市场实时涨跌家数（东方财富涨跌分布 getTopicZDFenBu）。
+
+    fenbu 按涨跌幅整数区间分桶：key>0 = 上涨家数、key<0 = 下跌家数、
+    key=0 = 平盘家数。全市场口径（与东财「涨跌分布」页一致）。
+
+    Returns:
+        {
+            "up_count"/"down_count"/"flat_count": 上涨/下跌/平盘家数,
+            "total": 总家数,
+            "up_down_ratio": 涨跌比 = up_count / down_count（down=0 时 None）,
+        }
+    """
+    import urllib.request
+
+    url = f"{_BREADTH_URL}?ut={_BREADTH_UT}&dpt=wz.ztzt"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+
+    fenbu = (payload.get("data") or {}).get("fenbu") or []
+    up = down = flat = 0
+    for item in fenbu:
+        for k, v in item.items():
+            try:
+                k = int(k)
+            except (TypeError, ValueError):
+                continue
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                continue
+            if k > 0:
+                up += v
+            elif k < 0:
+                down += v
+            else:
+                flat += v
+
+    ratio = round(up / down, 2) if down else None
+    return {
+        "up_count": up,
+        "down_count": down,
+        "flat_count": flat,
+        "total": up + down + flat,
+        "up_down_ratio": ratio,
+    }
+
+
 def collect_limit_up_pool(trade_date: Optional[str] = None) -> Dict[str, Any]:
     """采集当日全市场涨停池 + 炸板池 + 跌停池，落库 limit_up_pool。
 
