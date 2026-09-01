@@ -216,6 +216,7 @@ class LimitUpRow(BaseModel):
     fbt: Optional[str] = None                 # 首次涨停时间 HHMMSS
     lbt: Optional[str] = None                 # 最后封板时间 HHMMSS
     fund: Optional[float] = None              # 封单资金(元)
+    fund_rate: Optional[float] = None         # 封单率(%) = 封单资金/流通市值
     zbc: Optional[int] = None                 # 开板次数
     hybk: Optional[str] = None                # 所属行业名称
     hybk_code: Optional[str] = None           # 所属行业板块代码（跳日线图用）
@@ -631,6 +632,9 @@ async def get_limit_up(
         # 净额率(%) = 主力净流入 / 成交额 × 100
         if row.main_net_inflow is not None and row.amount:
             row.net_rate = round(row.main_net_inflow / row.amount * 100, 2)
+        # 封单率(%) = 封单资金 / 流通市值 × 100
+        if row.fund is not None and row.ltsz:
+            row.fund_rate = round(row.fund / row.ltsz * 100, 2)
         rows.append(row)
     return LimitUpResponse(date=trade_date, total=len(rows), pool=rows)
 

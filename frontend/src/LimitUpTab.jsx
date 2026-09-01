@@ -125,6 +125,11 @@ export default function LimitUpTab({ gotoDaily }) {
       render: (v) => (v != null ? (v / 1e8).toFixed(2) + "亿" : "-"),
     },
     {
+      title: "封单率", dataIndex: "fund_rate", key: "fund_rate", width: 90,
+      sorter: (a, b) => (a.fund_rate ?? 0) - (b.fund_rate ?? 0),
+      render: (v) => (v != null ? v.toFixed(2) + "%" : "-"),
+    },
+    {
       title: "换手率", dataIndex: "turnover_rate", key: "turnover_rate", width: 90,
       sorter: (a, b) => (a.turnover_rate ?? 0) - (b.turnover_rate ?? 0),
       render: (v) => (v != null ? v.toFixed(2) + "%" : "-"),
