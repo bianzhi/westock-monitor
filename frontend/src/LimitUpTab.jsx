@@ -58,6 +58,24 @@ export default function LimitUpTab({ gotoDaily }) {
     return true;
   });
 
+  // 行业分布基准池：连板 + 时段筛选后的涨停票（不含行业筛选），
+  // 让涨停行业分布随连板/时段筛选联动变化。
+  const industryBasePool = pool.filter((r) => {
+    if (lbcFilter != null && (r.lbc ?? 0) !== lbcFilter) return false;
+    if (timeFilter && timeBucket(r.fbt) !== timeFilter) return false;
+    return true;
+  });
+  const industryDist = (() => {
+    const counter = {};
+    industryBasePool.forEach((r) => {
+      const h = r.hybk || "其他";
+      counter[h] = (counter[h] || 0) + 1;
+    });
+    return Object.entries(counter)
+      .map(([hybk, count]) => ({ hybk, count }))
+      .sort((a, b) => b.count - a.count);
+  })();
+
   const fmtTime = (t) => {
     if (!t) return "-";
     const s = String(t).padStart(6, "0");
@@ -262,7 +280,7 @@ export default function LimitUpTab({ gotoDaily }) {
           </div>
           <div>
             涨停行业：
-            {summary.industry_top.map((d) => {
+            {industryDist.map((d) => {
               const active = industryFilter === d.hybk;
               return (
                 <Tag
