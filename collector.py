@@ -1279,6 +1279,14 @@ def collect_circ_mv_snapshot() -> Dict[str, Any]:
     Returns:
         {"timestamp": "...", "total": N, "valid": N, "written": N, "source": str}
     """
+    # 非交易日不采集：腾讯接口在周末返回前一交易日的涨跌幅，
+    # 若落库到周末日期会导致 K 线出现周末假蜡烛（涨跌幅数值错误）。
+    # 用 weekday 判断（is_trading_day 依赖缓存可能过期，工作日会误判）。
+    if datetime.now().weekday() >= 5:
+        logger.info("collect_circ_mv_snapshot: weekend, skip")
+        return {"timestamp": datetime.now().isoformat(), "total": 0, "valid": 0,
+                "written": 0, "skipped": True}
+
     from circ_mv_collector import (
         collect_all_sectors_circ_mv,
         collect_all_sectors_circ_mv_tencent,
