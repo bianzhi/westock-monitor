@@ -276,6 +276,20 @@ class Storage:
                 CREATE INDEX IF NOT EXISTS idx_constituent_stock
                 ON sector_constituent(stock_code)
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS index_kline (
+                    symbol      TEXT NOT NULL,      -- 指数代码 sh000001
+                    timeframe   TEXT NOT NULL,      -- day/m30/m5/m1
+                    dt          TEXT NOT NULL,      -- YYYYMMDD 或 YYYYMMDDHHMM
+                    open        REAL,
+                    high        REAL,
+                    low         REAL,
+                    close       REAL,
+                    vol         REAL,
+                    updated_at  TEXT,
+                    PRIMARY KEY (symbol, timeframe, dt)
+                )
+            """)
 
             conn.commit()
         logger.info("storage initialized: %s", self.db_path)
@@ -1401,6 +1415,45 @@ class Storage:
 
     # ============================================================
     # 统计信息
+    # ============================================================
+    # 指数多周期 K 线缓存
+    # ============================================================
+    def upsert_index_kline(self, records: List[Dict]) -> int:
+        """批量写入指数 K 线（symbol/timeframe/dt 唯一，冲突覆盖）。"""
+        if not records:
+            return 0
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            cur.executemany(
+                """
+                INSERT INTO index_kline (symbol, timeframe, dt, open, high, low, close, vol, updated_at)
+                VALUES (:symbol, :timeframe, :dt, :open, :high, :low, :close, :vol, :updated_at)
+                ON CONFLICT(symbol, timeframe, dt) DO UPDATE SET
+                    open=excluded.open, high=excluded.high, low=excluded.low,
+                    close=excluded.close, vol=excluded.vol, updated_at=excluded.updated_at
+                """,
+                records,
+            )
+            conn.commit()
+            return len(records)
+
+    def get_index_kline(self, symbol: str, timeframe: str, limit: int = 1000) -> List[Dict]:
+        """查询指数 K 线（按时间升序返回最近 limit 根）。"""
+        with _db_lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT dt, open, high, low, close, vol FROM index_kline
+                WHERE symbol = ? AND timeframe = ?
+                ORDER BY dt DESC LIMIT ?
+                """,
+                (symbol, timeframe, limit),
+            )
+            rows = cur.fetchall()
+        return list(reversed([dict(r) for r in rows]))
+
     # ============================================================
     def get_stats(self) -> Dict[str, Any]:
         """获取存储统计信息。"""

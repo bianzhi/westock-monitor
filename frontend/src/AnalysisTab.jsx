@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useMemo } from "react";
-import { Card, Tabs, Space, Button, Tag, message, Spin, Statistic, Row, Col } from "antd";
+import { Card, Tabs, Space, Button, Tag, message, Spin, Statistic, Row, Col, Select } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import ReactECharts from "echarts-for-react";
 import { fetchAnalysis } from "./api";
@@ -24,11 +24,12 @@ export default function AnalysisTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [code, setCode] = useState("sh000001");
+  const [timeframe, setTimeframe] = useState("day");
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (tf) => {
     setLoading(true);
     try {
-      setData(await fetchAnalysis());
+      setData(await fetchAnalysis(tf));
     } catch (e) {
       message.error("分析加载失败");
     } finally {
@@ -36,7 +37,7 @@ export default function AnalysisTab() {
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(timeframe); }, [timeframe, load]);
 
   const info = data?.[code];
 
@@ -117,7 +118,23 @@ export default function AnalysisTab() {
     <Card
       title="大盘指数 缠论 + 威科夫 量价分析"
       size="small"
-      extra={<Space><Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button></Space>}
+      extra={
+        <Space>
+          <span>周期：</span>
+          <Select
+            value={timeframe}
+            onChange={setTimeframe}
+            style={{ width: 100 }}
+            options={[
+              { value: "day", label: "日线" },
+              { value: "m30", label: "30分钟" },
+              { value: "m5", label: "5分钟" },
+              { value: "m1", label: "1分钟" },
+            ]}
+          />
+          <Button icon={<ReloadOutlined />} onClick={() => load(timeframe)} loading={loading}>刷新</Button>
+        </Space>
+      }
     >
       <Tabs
         activeKey={code}

@@ -352,6 +352,41 @@ def fetch_index_daily(codes, n: int = 25) -> Dict[str, List[Dict]]:
     return merged
 
 
+def fetch_index_mkline(codes, period="m30", n=320):
+    """拉取指数分钟 K 线（腾讯 ifzq.gtimg.cn mkline 接口）。
+
+    period: m1/m5/m15/m30/m60/m120（分钟级，支持指数）。
+    返回 {code: [{date, open, high, low, close, vol}]}（按时间升序）。
+    """
+    import urllib.request
+    import json
+    result = {}
+    for code in codes:
+        url = f"https://ifzq.gtimg.cn/appstock/app/kline/mkline?param={code},{period},,{n}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=TENCENT_TIMEOUT) as resp:
+                payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+        except Exception as e:
+            logger.warning("fetch_index_mkline %s %s failed: %s", code, period, e)
+            result[code] = []
+            continue
+        node = (payload.get("data") or {}).get(code) or {}
+        bars = node.get(period) or []
+        result[code] = [
+            {
+                "date": b[0],
+                "open": float(b[1]),
+                "close": float(b[2]),
+                "high": float(b[3]),
+                "low": float(b[4]),
+                "vol": float(b[5]),
+            }
+            for b in bars if len(b) >= 6
+        ]
+    return result
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     # 自测：查两只个股，验证字段单位

@@ -1097,46 +1097,66 @@ async def get_auction():
 
 
 @app.get("/api/analysis")
-async def get_analysis():
-    """大盘指数缠论 + 威科夫量价分析。
+@app.get("/api/analysis")
+async def get_analysis(
+    timeframe: str = Query("day", description="周期：day/m30/m5/m1"),
+):
+    """大盘指数缠论 + 威科夫量价分析（多周期）。
 
-    数据源：westock kline（指数日K，含 OHLCV），近 60 个交易日。
-    缠论：分型/笔/中枢/买卖点；威科夫：量价努力/阶段/供需。
+    数据源：日线走 westock kline，分钟线走腾讯 ifzq.gtimg.cn mkline。
+    结果缓存到 index_kline 表，缓存不足时才拉取（符合「数据先落库」原则）。
+    缠论：分型/笔/中枢/背驰/走势/买卖点；威科夫：量价/阶段/事件/区间/供需线。
     """
     from westock import kline
+    from tencent_quote import fetch_index_mkline
     import chanlun
     import wyckoff
 
     index_codes = ["sh000001", "sz399001", "sz399006"]
     names = {"sh000001": "上证指数", "sz399001": "深证成指", "sz399006": "创业板指"}
+    storage = get_storage()
 
-    try:
-        daily = kline(index_codes, limit=60)
-    except Exception as e:
-        logger.warning("analysis kline failed: %s", e)
-        daily = {}
+    # 各周期缓存目标点数（约 2 个月时间跨度）
+    target = {"day": 44, "m30": 352, "m5": 2112, "m1": 10560}
+    fetch_limit = {"day": 60, "m30": 400, "m5": 2400, "m1": 12000}
+    now_iso = datetime.now().isoformat()
 
     result = {}
-    for code, bars in daily.items():
-        if not bars:
-            continue
-        klines = []
-        for b in bars:
-            if b.get("open") is None or b.get("high") is None:
-                continue
-            klines.append({
-                "dt": b.get("date") or "",
-                "open": b["open"], "high": b["high"],
-                "low": b["low"], "close": b["close"],
-                "vol": b.get("volume") or 0,
-            })
+    for code in index_codes:
+        cached = storage.get_index_kline(code, timeframe, fetch_limit.get(timeframe, 1000))
+
+        # 缓存不足则从数据源拉取并落库
+        if len(cached) < target.get(timeframe, 44):
+            try:
+                if timeframe == "day":
+                    raw = kline([code], limit=60).get(code, [])
+                    bars = [{"dt": b["date"], "open": b["open"], "high": b["high"],
+                             "low": b["low"], "close": b["close"], "vol": b.get("volume") or 0}
+                            for b in raw if b.get("open") is not None]
+                else:
+                    raw = fetch_index_mkline([code], timeframe, 320).get(code, [])
+                    bars = [{"dt": b["date"], "open": b["open"], "high": b["high"],
+                             "low": b["low"], "close": b["close"], "vol": b.get("vol") or 0}
+                            for b in raw]
+                if bars:
+                    recs = [{"symbol": code, "timeframe": timeframe, "dt": b["dt"],
+                             "open": b["open"], "high": b["high"], "low": b["low"],
+                             "close": b["close"], "vol": b["vol"], "updated_at": now_iso}
+                            for b in bars]
+                    storage.upsert_index_kline(recs)
+                    cached = bars
+            except Exception as e:
+                logger.warning("analysis %s %s fetch failed: %s", code, timeframe, e)
+
+        klines = [{"dt": b["dt"], "open": b["open"], "high": b["high"],
+                   "low": b["low"], "close": b["close"], "vol": b["vol"]} for b in cached]
         if len(klines) < 10:
             continue
         try:
             cz = chanlun.analyze(klines)
             wy = wyckoff.analyze(klines)
         except Exception as e:
-            logger.warning("analysis %s failed: %s", code, e)
+            logger.warning("analysis %s %s failed: %s", code, timeframe, e)
             continue
         result[code] = {
             "name": names.get(code, code),
