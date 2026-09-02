@@ -1097,7 +1097,6 @@ async def get_auction():
 
 
 @app.get("/api/analysis")
-@app.get("/api/analysis")
 async def get_analysis(
     timeframe: str = Query("day", description="周期：day/m30/m5/m1"),
 ):
@@ -1116,9 +1115,9 @@ async def get_analysis(
     names = {"sh000001": "上证指数", "sz399001": "深证成指", "sz399006": "创业板指"}
     storage = get_storage()
 
-    # 各周期缓存目标点数（约 2 个月时间跨度）
-    target = {"day": 44, "m30": 352, "m5": 2112, "m1": 10560}
-    fetch_limit = {"day": 60, "m30": 400, "m5": 2400, "m1": 12000}
+    # 缓存目标点数：日线约 1 年(244 交易日)，分钟线按腾讯单次上限 800 根
+    target = {"day": 244, "m30": 800, "m5": 800, "m1": 800}
+    fetch_limit = {"day": 250, "m30": 800, "m5": 800, "m1": 800}
     now_iso = datetime.now().isoformat()
 
     result = {}
@@ -1129,12 +1128,12 @@ async def get_analysis(
         if len(cached) < target.get(timeframe, 44):
             try:
                 if timeframe == "day":
-                    raw = kline([code], limit=60).get(code, [])
+                    raw = kline([code], limit=250).get(code, [])
                     bars = [{"dt": b["date"], "open": b["open"], "high": b["high"],
                              "low": b["low"], "close": b["close"], "vol": b.get("volume") or 0}
                             for b in raw if b.get("open") is not None]
                 else:
-                    raw = fetch_index_mkline([code], timeframe, 320).get(code, [])
+                    raw = fetch_index_mkline([code], timeframe, 800).get(code, [])
                     bars = [{"dt": b["date"], "open": b["open"], "high": b["high"],
                              "low": b["low"], "close": b["close"], "vol": b.get("vol") or 0}
                             for b in raw]
