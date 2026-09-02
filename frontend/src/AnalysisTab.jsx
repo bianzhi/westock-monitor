@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo } from "react";
-import { Card, Tabs, Space, Button, Tag, message, Spin, Statistic, Row, Col, Select, Switch } from "antd";
-import { ReloadOutlined } from "@ant-design/icons";
+import { Card, Tabs, Space, Button, Tag, message, Spin, Statistic, Row, Col, Select, Switch, Tooltip } from "antd";
+import { ReloadOutlined, InfoCircleOutlined } from "@ant-design/icons";
 import ReactECharts from "echarts-for-react";
 import { fetchAnalysis } from "./api";
 
@@ -114,12 +114,44 @@ export default function AnalysisTab() {
       label: { show: true, formatter: e.event_type, fontSize: 8, color: "#722ed1", position: "bottom" },
     }));
 
+    // 威科夫交易区间（吸筹/派发矩形区域）
+    const wyTrAreas = (wyckoff.trading_ranges || []).map((tr) => {
+      const sdt = dates[tr.start_index] ?? tr.start_index;
+      const edt = dates[tr.end_index] ?? tr.end_index;
+      return [
+        { xAxis: sdt, yAxis: tr.lower, itemStyle: { color: tr.type === "accumulation" ? "rgba(19,194,194,0.12)" : "rgba(250,84,28,0.12)" } },
+        { xAxis: edt, yAxis: tr.upper },
+      ];
+    });
+
+    // 威科夫需求/供给出现信号
+    const demandPoints = (wyckoff.demand_signals || []).map((p) => ({
+      coord: [p.dt, p.price],
+      symbol: "pin",
+      symbolSize: 20,
+      itemStyle: { color: "#13c2c2" },
+      label: { show: true, formatter: "D", fontSize: 8, color: "#13c2c2", position: "bottom" },
+    }));
+    const supplyPoints = (wyckoff.supply_signals || []).map((p) => ({
+      coord: [p.dt, p.price],
+      symbol: "pin",
+      symbolRotate: 180,
+      symbolSize: 20,
+      itemStyle: { color: "#fa541c" },
+      label: { show: true, formatter: "S", fontSize: 8, color: "#fa541c", position: "top" },
+    }));
+
     const markPointData = [
       ...(showFx ? fxPoints : []),
       ...(showBsp ? bspPoints : []),
       ...(showWyckoff ? wyEvents : []),
+      ...(showWyckoff ? demandPoints : []),
+      ...(showWyckoff ? supplyPoints : []),
     ];
-    const markAreaData = showZs ? zsAreas : [];
+    const markAreaData = [
+      ...(showZs ? zsAreas : []),
+      ...(showWyckoff ? wyTrAreas : []),
+    ];
     const markLineData = [
       ...(showBi ? biLines : []),
       ...(showWyckoff ? wyLines : []),
@@ -234,8 +266,19 @@ export default function AnalysisTab() {
               <div style={{ marginTop: 4 }}>
                 压力位：{(summary.resistances || []).map((r) => <Tag key={r.desc} color="red" style={{ marginRight: 4 }}>{r.level}（{r.desc}）</Tag>)}
               </div>
-              <div style={{ marginTop: 4 }}>信号：{summary.signals?.join("；") || "-"}</div>
-              <div style={{ marginTop: 4, color: "#333" }}>操作建议：{summary.advice}</div>
+              <div style={{ marginTop: 4 }}>
+                信号：{(summary.signals || []).map((s) => (
+                  <Tooltip key={s.text} title={s.reason || "无依据"}>
+                    <Tag color="blue" style={{ marginRight: 4, cursor: "help" }}>{s.text}</Tag>
+                  </Tooltip>
+                ))}
+                {(summary.signals || []).length === 0 && "-"}
+              </div>
+              <div style={{ marginTop: 4, color: "#333" }}>
+                <Tooltip title={<div>{(summary.advice_reasons || []).map((r, i) => <div key={i}>{r}</div>)}</div>}>
+                  <span style={{ cursor: "help" }}>操作建议：<b>{summary.advice}</b> <InfoCircleOutlined style={{ color: "#999" }} /></span>
+                </Tooltip>
+              </div>
             </div>
           )}
           {option && <ReactECharts option={option} notMerge style={{ height: 560 }} />}

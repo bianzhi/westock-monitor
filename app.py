@@ -1139,17 +1139,18 @@ def _build_market_summary(klines, cz, wy):
     supports = sorted(supports, key=lambda x: -x["level"])[:3]
     resistances = sorted(resistances, key=lambda x: x["level"])[:3]
 
-    # --- 背驰/买卖点信号 ---
+    # --- 背驰/买卖点信号（带判断依据）---
     signals = []
     beichi = cz.get("beichi", [])
     if beichi:
         b = beichi[-1]
         kind = "底背驰" if b.get("direction") == "down" else "顶背驰"
-        signals.append(f"{kind}（{b.get('reason', '')}）")
+        signals.append({"text": kind, "reason": b.get("reason", "")})
     bsp = cz.get("buy_sell_points", [])
     if bsp:
         p = bsp[-1]
-        signals.append(f"{p.get('type')} 买卖点 @ {p.get('price')}")
+        signals.append({"text": f"{p.get('type')} 买卖点 @ {p.get('price')}",
+                        "reason": p.get("reason", "")})
 
     # --- 操作建议 ---
     advice_parts = []
@@ -1170,6 +1171,20 @@ def _build_market_summary(klines, cz, wy):
         advice_parts.append(f"上方压力 {resistances[0]['level']}（{resistances[0]['desc']}）")
     advice = "；".join(advice_parts) if advice_parts else "暂无明确信号，维持观望"
 
+    # 操作建议的判断依据（hover 提示）
+    advice_reasons = []
+    if beichi:
+        b = beichi[-1]
+        advice_reasons.append(f"背驰：{b.get('reason', '')}")
+    if bsp:
+        p = bsp[-1]
+        advice_reasons.append(f"买卖点：{p.get('reason', '')}")
+    if supports:
+        advice_reasons.append(f"支撑：{supports[0]['desc']} {supports[0]['level']}")
+    if resistances:
+        advice_reasons.append(f"压力：{resistances[0]['desc']} {resistances[0]['level']}")
+    advice_reasons.append(f"阶段：缠论{cz_trend or '未知'} + 威科夫{wy_phase}")
+
     return {
         "latest_close": round(latest_close, 2),
         "cz_trend": cz_trend,
@@ -1178,6 +1193,7 @@ def _build_market_summary(klines, cz, wy):
         "resistances": resistances,
         "signals": signals,
         "advice": advice,
+        "advice_reasons": advice_reasons,
     }
 
 
