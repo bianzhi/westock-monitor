@@ -12,6 +12,7 @@ const INDEX_TABS = [
   { key: "sh000001", label: "上证指数" },
   { key: "sz399001", label: "深证成指" },
   { key: "sz399006", label: "创业板指" },
+  { key: "sh000688", label: "科创50" },
 ];
 
 const PHASE_COLOR = { 上涨: UP, 下跌: DOWN, 吸筹: WARN, 派发: "#7f8c8d" };

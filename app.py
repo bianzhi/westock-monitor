@@ -1111,8 +1111,8 @@ async def get_analysis(
     import chanlun
     import wyckoff
 
-    index_codes = ["sh000001", "sz399001", "sz399006"]
-    names = {"sh000001": "上证指数", "sz399001": "深证成指", "sz399006": "创业板指"}
+    index_codes = ["sh000001", "sz399001", "sz399006", "sh000688"]
+    names = {"sh000001": "上证指数", "sz399001": "深证成指", "sz399006": "创业板指", "sh000688": "科创50"}
     storage = get_storage()
 
     # 缓存目标点数：日线约 1 年(244 交易日)，分钟线按腾讯单次上限 800 根
