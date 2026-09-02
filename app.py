@@ -927,6 +927,11 @@ async def get_review34(
         })
     sectors.sort(key=lambda x: (-x["limit_up_count"], -(x["score"] or 0)))
 
+    # 行业名 → 板块代码（二级行业 pt018，超链接跳板块日线图用）
+    from sectors import get_default_sector_map
+    name_to_l2 = {info.get("name"): code
+                  for code, info in get_default_sector_map().items() if info.get("name")}
+
     # ---------- S3 个股 N 板筛选（stage 指定 N：1进2/2进3/3进4/4进5） ----------
     stocks = []
     for r in zt_pool:
@@ -968,9 +973,11 @@ async def get_review34(
             "code": r.get("code"),
             "name": r.get("name"),
             "hybk": r.get("hybk"),
+            "hybk_code": name_to_l2.get(r.get("hybk")),
             "ltsz_yi": round((ltsz or 0) / 1e8, 2),
             "turnover_rate": hs,
             "seal_quality": seal_q,
+            "fbt": r.get("fbt"),
             "zbc": zbc,
             "fund": fund,
             "fund_rate": fund_rate,

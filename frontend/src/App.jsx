@@ -1452,7 +1452,7 @@ export default function App() {
             {
               key: "review34",
               label: "连板",
-              children: <Review34Tab />,
+              children: <Review34Tab gotoDaily={gotoDaily} />,
             },
           ]}
         />

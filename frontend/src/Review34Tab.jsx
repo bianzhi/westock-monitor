@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { Card, Table, Space, Button, DatePicker, Statistic, Tag, message, Row, Col, Spin, Select, Tooltip } from "antd";
-import { ReloadOutlined } from "@ant-design/icons";
+import { ReloadOutlined, InfoCircleOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import { fetchReview34 } from "./api";
 
@@ -39,11 +39,14 @@ function ScoreDetail({ detail }) {
  *   S3 个股 N 板筛选（做哪只）—— 封板质量/换手/炸板 + 入选判断
  * 数据由 /api/review34 从落库涨停池聚合计算，只读库不调外部接口。
  */
-export default function Review34Tab() {
+export default function Review34Tab({ gotoDaily }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [date, setDate] = useState(dayjs());
   const [stage, setStage] = useState(3);
+  const [ladderFilter, setLadderFilter] = useState(null); // null=全部 / 完整/缺2板/独苗
+  const [boardFilter, setBoardFilter] = useState(null); // null=全部 / "5+"/"4"/"3"/"2"/"1"
+  const [industryFilter, setIndustryFilter] = useState(null); // S3 行业筛选
 
   const load = useCallback(async (d, s) => {
     setLoading(true);
@@ -63,6 +66,25 @@ export default function Review34Tab() {
   const sectors = data?.sectors || [];
   const stocks = data?.stocks || [];
   const p = market?.promotion || {};
+
+  // S2 梯队完整性 + 板级筛选后的板块
+  const filteredSectors = sectors.filter((s) => {
+    if (ladderFilter && s.ladder !== ladderFilter) return false;
+    if (boardFilter) {
+      const d = s.lbc_dist || {};
+      const cnt = boardFilter === "5+" ? d["5+"] : d[boardFilter];
+      if (!cnt) return false;
+    }
+    return true;
+  });
+
+  // S3 行业筛选后的个股
+  const filteredStocks = industryFilter
+    ? stocks.filter((s) => (s.hybk || "") === industryFilter)
+    : stocks;
+
+  // S3 行业去重列表（供筛选下拉）
+  const industryOptions = [...new Set(stocks.map((s) => s.hybk).filter(Boolean))].map((h) => ({ value: h, label: h }));
 
   const fmtRate = (v) => (v == null ? "-" : `${v}%`);
 
@@ -90,7 +112,12 @@ export default function Review34Tab() {
     },
     { title: "梯队", dataIndex: "ladder", key: "ladder", width: 90 },
     {
-      title: "资金强度", dataIndex: "fund_strength", key: "fund_strength", width: 100,
+      title: (
+        <Tooltip title="资金强度 = 板块涨停票主力净流入之和 ÷ 成交额之和 × 100%">
+          <span>资金强度 <InfoCircleOutlined style={{ color: "#999" }} /></span>
+        </Tooltip>
+      ),
+      dataIndex: "fund_strength", key: "fund_strength", width: 110,
       sorter: (a, b) => (a.fund_strength ?? 0) - (b.fund_strength ?? 0),
       render: (v) => (v != null ? <span style={{ color: v >= 0 ? UP : DOWN }}>{v}%</span> : "-"),
     },
@@ -107,11 +134,25 @@ export default function Review34Tab() {
   ];
 
   const stockColumns = [
-    { title: "代码", dataIndex: "code", key: "code", width: 100 },
-    { title: "名称", dataIndex: "name", key: "name", width: 100 },
-    { title: "行业", dataIndex: "hybk", key: "hybk", width: 100 },
-    { title: "流通值(亿)", dataIndex: "ltsz_yi", key: "ltsz_yi", width: 100 },
-    { title: "换手率", dataIndex: "turnover_rate", key: "turnover_rate", width: 90, render: (v) => (v != null ? `${v}%` : "-") },
+    { title: "代码", dataIndex: "code", key: "code", width: 100, render: (v, r) => <a title="个股分时图（后续开放）">{v}</a> },
+    { title: "名称", dataIndex: "name", key: "name", width: 100, render: (v, r) => <a title="个股分时图（后续开放）">{v}</a> },
+    {
+      title: "行业", dataIndex: "hybk", key: "hybk", width: 100,
+      render: (v, r) => (v ? (
+        r.hybk_code ? <a onClick={() => gotoDaily?.(r.hybk_code)} title="跳转板块日线图">{v}</a> : v
+      ) : "-"),
+    },
+    { title: "流通值(亿)", dataIndex: "ltsz_yi", key: "ltsz_yi", width: 100, sorter: (a, b) => (a.ltsz_yi ?? 0) - (b.ltsz_yi ?? 0) },
+    { title: "换手率", dataIndex: "turnover_rate", key: "turnover_rate", width: 90, sorter: (a, b) => (a.turnover_rate ?? 0) - (b.turnover_rate ?? 0), render: (v) => (v != null ? `${Number(v).toFixed(2)}%` : "-") },
+    {
+      title: "封板时间", dataIndex: "fbt", key: "fbt", width: 90,
+      sorter: (a, b) => (a.fbt || "").localeCompare(b.fbt || ""),
+      render: (v) => {
+        if (!v) return "-";
+        const s = String(v).padStart(6, "0");
+        return `${s.slice(0, 2)}:${s.slice(2, 4)}:${s.slice(4, 6)}`;
+      },
+    },
     {
       title: "封板质量", dataIndex: "seal_quality", key: "seal_quality", width: 110,
       render: (v) => {
@@ -119,21 +160,24 @@ export default function Review34Tab() {
         return <span style={{ color: c }}>{v}</span>;
       },
     },
-    { title: "炸板次数", dataIndex: "zbc", key: "zbc", width: 90, render: (v) => <span style={{ color: v >= 3 ? DOWN : undefined }}>{v}</span> },
+    { title: "炸板次数", dataIndex: "zbc", key: "zbc", width: 90, sorter: (a, b) => (a.zbc ?? 0) - (b.zbc ?? 0), render: (v) => <span style={{ color: v >= 3 ? DOWN : undefined }}>{v}</span> },
     {
       title: "封单资金(亿)", dataIndex: "fund", key: "fund", width: 110,
+      sorter: (a, b) => (a.fund ?? 0) - (b.fund ?? 0),
       render: (v) => (v != null ? (v / 1e8).toFixed(2) : "-"),
     },
-    { title: "封单率", dataIndex: "fund_rate", key: "fund_rate", width: 90, render: (v) => (v != null ? `${v}%` : "-") },
+    { title: "封单率", dataIndex: "fund_rate", key: "fund_rate", width: 90, sorter: (a, b) => (a.fund_rate ?? 0) - (b.fund_rate ?? 0), render: (v) => (v != null ? `${v}%` : "-") },
     {
       title: "成交额(亿)", dataIndex: "amount", key: "amount", width: 110,
+      sorter: (a, b) => (a.amount ?? 0) - (b.amount ?? 0),
       render: (v) => (v != null ? (v / 1e8).toFixed(2) : "-"),
     },
     {
       title: "主力净流入(亿)", dataIndex: "main_net_inflow", key: "main_net_inflow", width: 120,
+      sorter: (a, b) => (a.main_net_inflow ?? 0) - (b.main_net_inflow ?? 0),
       render: (v) => (v != null ? <span style={{ color: v > 0 ? UP : v < 0 ? DOWN : "#95a5a6" }}>{(v / 1e8).toFixed(2)}</span> : "-"),
     },
-    { title: "净额率", dataIndex: "net_rate", key: "net_rate", width: 90, render: (v) => (v != null ? `${v}%` : "-") },
+    { title: "净额率", dataIndex: "net_rate", key: "net_rate", width: 90, sorter: (a, b) => (a.net_rate ?? 0) - (b.net_rate ?? 0), render: (v) => (v != null ? `${v}%` : "-") },
     {
       title: "评分", dataIndex: "score", key: "score", width: 80,
       sorter: (a, b) => (a.score ?? 0) - (b.score ?? 0),
@@ -208,11 +252,45 @@ export default function Review34Tab() {
         )}
       </Card>
 
-      <Card title="板块强度资金梯队（S2 · 在哪做）" size="small" style={{ marginBottom: 12 }}>
+      <Card
+        title="板块强度资金梯队（S2 · 在哪做）"
+        size="small"
+        style={{ marginBottom: 12 }}
+        extra={
+          <Space wrap>
+            <span>梯队筛选：</span>
+            <Select
+              value={ladderFilter ?? "all"}
+              onChange={(v) => setLadderFilter(v === "all" ? null : v)}
+              style={{ width: 120 }}
+              options={[
+                { value: "all", label: "全部" },
+                { value: "完整", label: "完整" },
+                { value: "缺2板", label: "缺2板" },
+                { value: "独苗", label: "独苗" },
+              ]}
+            />
+            <span>板级筛选：</span>
+            <Select
+              value={boardFilter ?? "all"}
+              onChange={(v) => setBoardFilter(v === "all" ? null : v)}
+              style={{ width: 120 }}
+              options={[
+                { value: "all", label: "全部" },
+                { value: "5+", label: "有5+板" },
+                { value: "4", label: "有4板" },
+                { value: "3", label: "有3板" },
+                { value: "2", label: "有2板" },
+                { value: "1", label: "有1板" },
+              ]}
+            />
+          </Space>
+        }
+      >
         <Table
           rowKey="name"
           columns={sectorColumns}
-          dataSource={sectors}
+          dataSource={filteredSectors}
           loading={loading}
           size="small"
           scroll={{ x: 1200 }}
@@ -220,14 +298,33 @@ export default function Review34Tab() {
         />
       </Card>
 
-      <Card title={`个股${stage}板筛选（S3 · 做哪只）`} size="small">
+      <Card
+        title={`个股${stage}板筛选（S3 · 做哪只）`}
+        size="small"
+        extra={
+          <Space>
+            <span>行业筛选：</span>
+            <Select
+              value={industryFilter ?? "all"}
+              onChange={(v) => setIndustryFilter(v === "all" ? null : v)}
+              style={{ width: 140 }}
+              allowClear
+              showSearch
+              options={[
+                { value: "all", label: "全部" },
+                ...industryOptions,
+              ]}
+            />
+          </Space>
+        }
+      >
         <Table
           rowKey="code"
           columns={stockColumns}
-          dataSource={stocks}
+          dataSource={filteredStocks}
           loading={loading}
           size="small"
-          scroll={{ x: 1500 }}
+          scroll={{ x: 1600 }}
           pagination={false}
         />
       </Card>
