@@ -7,8 +7,16 @@
   3. 努力与结果法则（成交量=努力，价格变动=结果）
 
 数据格式：
-    klines = [{dt, open, high, low, close, vol}, ...]（按时间升序）
+    klines = [{dt, open, high, low, close, vol, amount}, ...]（按时间升序）
 """
+
+
+def _qty(k):
+    """量价分析的「量」：优先用成交额 amount（元，口径一致），回退 vol。
+
+    westock 日线 volume 存在单位跳变（历史比今天少 100 倍），故统一改用 amount。
+    """
+    return k.get("amount") or k.get("vol") or 0
 
 
 # ============================================================
@@ -39,10 +47,10 @@ def analyze_effort_result(klines):
     """
     if len(klines) < 5:
         return []
-    avg_vol = sum(k["vol"] for k in klines) / len(klines)
+    avg_vol = sum(_qty(k) for k in klines) / len(klines)
     results = []
     for i, k in enumerate(klines):
-        effort = k["vol"] / avg_vol if avg_vol > 0 else 1.0
+        effort = _qty(k) / avg_vol if avg_vol > 0 else 1.0
         result = abs(k["close"] - k["open"]) / k["open"] if k["open"] > 0 else 0.0
         is_up = k["close"] >= k["open"]
         harmony, interp = _classify_effort_result(effort, result, is_up)
@@ -58,8 +66,8 @@ def volume_trend(klines):
     if len(klines) < 6:
         return 0.0
     half = len(klines) // 2
-    first = sum(k["vol"] for k in klines[:half]) / half
-    second = sum(k["vol"] for k in klines[half:]) / (len(klines) - half)
+    first = sum(_qty(k) for k in klines[:half]) / half
+    second = sum(_qty(k) for k in klines[half:]) / (len(klines) - half)
     return (second - first) / first if first > 0 else 0.0
 
 
@@ -67,9 +75,9 @@ def detect_demand_appearing(klines, idx):
     """下跌中的需求出现：放量 + 跌幅极小/收阳。"""
     if idx < 5 or idx >= len(klines):
         return False
-    avg_vol = sum(k["vol"] for k in klines[idx - 5:idx + 1]) / 6
+    avg_vol = sum(_qty(k) for k in klines[idx - 5:idx + 1]) / 6
     k = klines[idx]
-    vol_surge = k["vol"] > avg_vol * 1.5
+    vol_surge = _qty(k) > avg_vol * 1.5
     small_drop = k["close"] < k["open"] and (k["open"] - k["close"]) / k["open"] < 0.01
     turn_up = k["close"] >= k["open"]
     return vol_surge and (small_drop or turn_up)
@@ -79,9 +87,9 @@ def detect_supply_appearing(klines, idx):
     """上涨中的供给出现：放量 + 涨幅极小/收阴。"""
     if idx < 5 or idx >= len(klines):
         return False
-    avg_vol = sum(k["vol"] for k in klines[idx - 5:idx + 1]) / 6
+    avg_vol = sum(_qty(k) for k in klines[idx - 5:idx + 1]) / 6
     k = klines[idx]
-    vol_surge = k["vol"] > avg_vol * 1.5
+    vol_surge = _qty(k) > avg_vol * 1.5
     small_rise = k["close"] > k["open"] and (k["close"] - k["open"]) / k["open"] < 0.01
     turn_down = k["close"] <= k["open"]
     return vol_surge and (small_rise or turn_down)
@@ -158,7 +166,7 @@ def detect_events(klines):
     VOL_WINDOW = 60
     for i in range(5, len(klines) - 3):
         win_start = max(0, i - VOL_WINDOW)
-        avg_vol = _rolling_avg(klines, win_start, i, lambda k: k["vol"])
+        avg_vol = _rolling_avg(klines, win_start, i, lambda k: _qty(k))
         avg_spread = _rolling_avg(klines, win_start, i, lambda k: k["high"] - k["low"])
         k = klines[i]
         lookback = max(3, min(10, i))
@@ -166,8 +174,8 @@ def detect_events(klines):
         trend_up = k["close"] > klines[i - lookback]["close"]
         spread = k["high"] - k["low"]
         wide = spread > avg_spread * 2.0
-        heavy = k["vol"] > avg_vol * 2.0
-        surge = k["vol"] > avg_vol * 1.5
+        heavy = _qty(k) > avg_vol * 2.0
+        surge = _qty(k) > avg_vol * 1.5
 
         # PS 初步支撑：下跌中放量但跌幅收窄
         prev_amp = abs(klines[i - 1]["open"] - klines[i - 1]["close"])
@@ -201,7 +209,7 @@ def detect_events(klines):
                     _add_event(events, "Spring", i, k, k["low"], "跌破 SC 低点后收回")
                     break
             # ST 二次测试：回测 SC 低点量缩
-            if k["low"] <= scs[-1]["price"] * 1.02 and k["vol"] < avg_vol:
+            if k["low"] <= scs[-1]["price"] * 1.02 and _qty(k) < avg_vol:
                 _add_event(events, "ST", i, k, k["low"], "回测 SC 低点量缩")
 
         # SOS：放量突破 AR 高点
@@ -211,7 +219,7 @@ def detect_events(klines):
 
         # LPS：SOS 后缩量回调
         soss = [e for e in events if e["event_type"] == "SOS" and e["index"] < i]
-        if soss and k["vol"] < avg_vol and k["low"] > soss[-1]["price"] * 0.97:
+        if soss and _qty(k) < avg_vol and k["low"] > soss[-1]["price"] * 0.97:
             _add_event(events, "LPS", i, k, k["low"], "SOS 后缩量回调获支撑")
 
         # JOC：放量突破阻力（突破近期高点）

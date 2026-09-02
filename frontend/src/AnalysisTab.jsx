@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useMemo } from "react";
-import { Card, Tabs, Space, Button, Tag, message, Spin, Statistic, Row, Col, Select } from "antd";
+import { Card, Tabs, Space, Button, Tag, message, Spin, Statistic, Row, Col, Select, Switch } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import ReactECharts from "echarts-for-react";
 import { fetchAnalysis } from "./api";
@@ -26,6 +26,11 @@ export default function AnalysisTab() {
   const [loading, setLoading] = useState(false);
   const [code, setCode] = useState("sh000001");
   const [timeframe, setTimeframe] = useState("day");
+  const [showFx, setShowFx] = useState(true);       // 分型
+  const [showBi, setShowBi] = useState(true);       // 笔
+  const [showZs, setShowZs] = useState(true);       // 中枢
+  const [showBsp, setShowBsp] = useState(true);     // 买卖点
+  const [showWyckoff, setShowWyckoff] = useState(true); // 威科夫信号
 
   const load = useCallback(async (tf) => {
     setLoading(true);
@@ -44,7 +49,7 @@ export default function AnalysisTab() {
 
   const option = useMemo(() => {
     if (!info) return null;
-    const { klines, chanlun = {} } = info;
+    const { klines, chanlun = {}, wyckoff = {} } = info;
     const dates = klines.map((k) => k.dt);
     const candle = klines.map((k) => [k.open, k.close, k.low, k.high]);
     const vols = klines.map((k) => k.vol);
@@ -74,13 +79,59 @@ export default function AnalysisTab() {
       { xAxis: z.end_dt, yAxis: z.zg },
     ]);
 
+    // 笔的连线（向上红/向下绿）
+    const biLines = (chanlun.bis || []).map((bi) => ({
+      coords: [
+        [bi.start_dt, bi.start],
+        [bi.end_dt, bi.end],
+      ],
+      lineStyle: { color: bi.dir === "up" ? UP : DOWN, width: 1.5, type: "solid" },
+    }));
+
+    // 威科夫供需线（供给/需求/冰线）
+    const wyLines = (wyckoff.supply_demand_lines || []).map((l) => {
+      const sdt = dates[l.start_index] ?? l.start_index;
+      const edt = dates[l.end_index] ?? l.end_index;
+      return {
+        coords: [
+          [sdt, l.start_price],
+          [edt, l.end_price],
+        ],
+        lineStyle: {
+          color: l.line_type === "ice_line" ? "#722ed1" : l.line_type === "supply" ? "#fa541c" : "#13c2c2",
+          width: 1,
+          type: l.line_type === "ice_line" ? "dashed" : "dotted",
+        },
+      };
+    });
+
+    // 威科夫事件标记（SC/AR/BC/Spring/SOS 等）
+    const wyEvents = (wyckoff.events || []).map((e) => ({
+      coord: [e.dt, e.price],
+      symbol: "rect",
+      symbolSize: 7,
+      itemStyle: { color: "#722ed1" },
+      label: { show: true, formatter: e.event_type, fontSize: 8, color: "#722ed1", position: "bottom" },
+    }));
+
+    const markPointData = [
+      ...(showFx ? fxPoints : []),
+      ...(showBsp ? bspPoints : []),
+      ...(showWyckoff ? wyEvents : []),
+    ];
+    const markAreaData = showZs ? zsAreas : [];
+    const markLineData = [
+      ...(showBi ? biLines : []),
+      ...(showWyckoff ? wyLines : []),
+    ];
+
     return {
       animation: false,
       tooltip: { trigger: "axis", axisPointer: { type: "cross" } },
       legend: { data: ["K线", "成交量"], top: 5, textStyle: { fontSize: 11 } },
       grid: [
-        { left: 60, right: 30, top: 40, height: "58%" },
-        { left: 60, right: 30, top: "76%", height: "16%" },
+        { left: 60, right: 30, top: 40, bottom: 48, height: "55%" },
+        { left: 60, right: 30, top: "74%", bottom: 38, height: "15%" },
       ],
       xAxis: [
         { type: "category", data: dates, gridIndex: 0, axisLabel: { show: false } },
@@ -90,15 +141,19 @@ export default function AnalysisTab() {
         { type: "value", gridIndex: 0, scale: true, splitLine: { lineStyle: { type: "dashed", color: "#e0e0e0" } } },
         { type: "value", gridIndex: 1, splitLine: { show: false } },
       ],
-      dataZoom: [{ type: "inside", xAxisIndex: [0, 1] }],
+      dataZoom: [
+        { type: "inside", xAxisIndex: [0, 1] },
+        { type: "slider", xAxisIndex: [0, 1], bottom: 4, height: 18 },
+      ],
       series: [
         {
           name: "K线",
           type: "candlestick",
           data: candle,
           itemStyle: { color: UP, color0: DOWN, borderColor: UP, borderColor0: DOWN },
-          markPoint: { data: [...fxPoints, ...bspPoints] },
-          markArea: { data: zsAreas },
+          markPoint: { data: markPointData },
+          markLine: { data: markLineData, symbol: "none" },
+          markArea: { data: markAreaData },
         },
         {
           name: "成交量",
@@ -110,10 +165,11 @@ export default function AnalysisTab() {
         },
       ],
     };
-  }, [info]);
+  }, [info, showFx, showBi, showZs, showBsp, showWyckoff]);
 
   const wy = info?.wyckoff || {};
   const cz = info?.chanlun || {};
+  const summary = info?.summary;
 
   return (
     <Card
@@ -143,6 +199,13 @@ export default function AnalysisTab() {
         items={INDEX_TABS.map((t) => ({ key: t.key, label: t.label }))}
         style={{ marginBottom: 12 }}
       />
+      <Row gutter={[16, 8]} style={{ marginBottom: 12 }}>
+        <Col><Space size={4}>分型<Switch size="small" checked={showFx} onChange={setShowFx} /></Space></Col>
+        <Col><Space size={4}>笔<Switch size="small" checked={showBi} onChange={setShowBi} /></Space></Col>
+        <Col><Space size={4}>中枢<Switch size="small" checked={showZs} onChange={setShowZs} /></Space></Col>
+        <Col><Space size={4}>买卖点<Switch size="small" checked={showBsp} onChange={setShowBsp} /></Space></Col>
+        <Col><Space size={4}>威科夫信号<Switch size="small" checked={showWyckoff} onChange={setShowWyckoff} /></Space></Col>
+      </Row>
       {info ? (
         <>
           <Row gutter={[16, 8]} style={{ marginBottom: 12 }}>
@@ -158,6 +221,23 @@ export default function AnalysisTab() {
             <Col><Statistic title="中枢数" value={cz.zss?.length ?? 0} /></Col>
             <Col><Statistic title="买卖点" value={cz.buy_sell_points?.length ?? 0} /></Col>
           </Row>
+          {summary && (
+            <div style={{ marginBottom: 12, padding: 12, background: "#fafafa", borderRadius: 6 }}>
+              <Space size="large" wrap style={{ marginBottom: 4 }}>
+                <span>缠论走势：<b>{summary.cz_trend || "-"}</b></span>
+                <span>威科夫阶段：<b style={{ color: PHASE_COLOR[summary.wy_phase] || "#333" }}>{summary.wy_phase || "-"}</b></span>
+                <span>现价：<b>{summary.latest_close}</b></span>
+              </Space>
+              <div style={{ marginTop: 4 }}>
+                支撑位：{(summary.supports || []).map((s) => <Tag key={s.desc} color="green" style={{ marginRight: 4 }}>{s.level}（{s.desc}）</Tag>)}
+              </div>
+              <div style={{ marginTop: 4 }}>
+                压力位：{(summary.resistances || []).map((r) => <Tag key={r.desc} color="red" style={{ marginRight: 4 }}>{r.level}（{r.desc}）</Tag>)}
+              </div>
+              <div style={{ marginTop: 4 }}>信号：{summary.signals?.join("；") || "-"}</div>
+              <div style={{ marginTop: 4, color: "#333" }}>操作建议：{summary.advice}</div>
+            </div>
+          )}
           {option && <ReactECharts option={option} notMerge style={{ height: 560 }} />}
           <div style={{ marginTop: 12, fontSize: 12, color: "#666" }}>
             图例：

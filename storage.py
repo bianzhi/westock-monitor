@@ -286,10 +286,16 @@ class Storage:
                     low         REAL,
                     close       REAL,
                     vol         REAL,
+                    amount      REAL,               -- 成交额(元)，量价分析统一用此
                     updated_at  TEXT,
                     PRIMARY KEY (symbol, timeframe, dt)
                 )
             """)
+            # 兼容旧表：补充 amount 列（量价分析统一用成交额，避免 westock volume 单位跳变）
+            try:
+                cur.execute("ALTER TABLE index_kline ADD COLUMN amount REAL")
+            except Exception:
+                pass
 
             conn.commit()
         logger.info("storage initialized: %s", self.db_path)
@@ -1427,11 +1433,11 @@ class Storage:
             cur = conn.cursor()
             cur.executemany(
                 """
-                INSERT INTO index_kline (symbol, timeframe, dt, open, high, low, close, vol, updated_at)
-                VALUES (:symbol, :timeframe, :dt, :open, :high, :low, :close, :vol, :updated_at)
+                INSERT INTO index_kline (symbol, timeframe, dt, open, high, low, close, vol, amount, updated_at)
+                VALUES (:symbol, :timeframe, :dt, :open, :high, :low, :close, :vol, :amount, :updated_at)
                 ON CONFLICT(symbol, timeframe, dt) DO UPDATE SET
                     open=excluded.open, high=excluded.high, low=excluded.low,
-                    close=excluded.close, vol=excluded.vol, updated_at=excluded.updated_at
+                    close=excluded.close, vol=excluded.vol, amount=excluded.amount, updated_at=excluded.updated_at
                 """,
                 records,
             )
@@ -1445,7 +1451,7 @@ class Storage:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT dt, open, high, low, close, vol FROM index_kline
+                SELECT dt, open, high, low, close, vol, amount FROM index_kline
                 WHERE symbol = ? AND timeframe = ?
                 ORDER BY dt DESC LIMIT ?
                 """,

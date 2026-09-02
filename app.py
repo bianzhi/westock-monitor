@@ -1096,6 +1096,91 @@ async def get_auction():
     }
 
 
+def _build_market_summary(klines, cz, wy):
+    """大盘综合描述：阶段 / 压力位 / 支撑位 / 操作建议（专家水准）。
+
+    综合缠论（走势/中枢/背驰/买卖点）与威科夫（阶段/交易区间/供需线），
+    提炼当前所处阶段、关键支撑压力位与操作建议。
+    """
+    if not klines:
+        return None
+    latest_close = klines[-1]["close"]
+
+    # --- 阶段判断 ---
+    zoushi = cz.get("zoushi", [])
+    cz_trend = None
+    if zoushi:
+        z = zoushi[-1]
+        cz_trend = ("上涨趋势" if z.get("direction") == "up" else "下跌趋势") \
+            if z.get("type") == "trend" else "盘整"
+    wy_phase = wy.get("latest_phase") or "未知"
+
+    # --- 支撑位 / 压力位 ---
+    supports = []
+    resistances = []
+    latest_zs = cz.get("latest_zs")
+    if latest_zs:
+        supports.append({"level": round(latest_zs["zd"], 2), "desc": "最近中枢下沿 ZD"})
+        resistances.append({"level": round(latest_zs["zg"], 2), "desc": "最近中枢上沿 ZG"})
+    trs = wy.get("trading_ranges", [])
+    if trs:
+        tr = trs[-1]
+        supports.append({"level": round(tr["lower"], 2), "desc": "威科夫区间下沿"})
+        resistances.append({"level": round(tr["upper"], 2), "desc": "威科夫区间上沿"})
+        supports.append({"level": round(tr["ice_line"], 2), "desc": "威科夫冰线"})
+    n = min(20, len(klines))
+    recent_high = max(k["high"] for k in klines[-n:])
+    recent_low = min(k["low"] for k in klines[-n:])
+    if latest_close > recent_high * 0.995:
+        resistances.append({"level": round(recent_high, 2), "desc": "近20根高点"})
+    if latest_close < recent_low * 1.005:
+        supports.append({"level": round(recent_low, 2), "desc": "近20根低点"})
+
+    supports = sorted(supports, key=lambda x: -x["level"])[:3]
+    resistances = sorted(resistances, key=lambda x: x["level"])[:3]
+
+    # --- 背驰/买卖点信号 ---
+    signals = []
+    beichi = cz.get("beichi", [])
+    if beichi:
+        b = beichi[-1]
+        kind = "底背驰" if b.get("direction") == "down" else "顶背驰"
+        signals.append(f"{kind}（{b.get('reason', '')}）")
+    bsp = cz.get("buy_sell_points", [])
+    if bsp:
+        p = bsp[-1]
+        signals.append(f"{p.get('type')} 买卖点 @ {p.get('price')}")
+
+    # --- 操作建议 ---
+    advice_parts = []
+    if beichi:
+        b = beichi[-1]
+        advice_parts.append("出现底背驰，下跌动能衰竭，关注企稳后的买入机会"
+                            if b.get("direction") == "down"
+                            else "出现顶背驰，上涨动能衰竭，警惕回调")
+    if bsp:
+        p = bsp[-1]
+        if p.get("type", "").endswith("buy"):
+            advice_parts.append(f"出现 {p.get('type')} 买点，可关注入场")
+        else:
+            advice_parts.append(f"出现 {p.get('type')} 卖点，注意减仓")
+    if supports:
+        advice_parts.append(f"下方支撑 {supports[0]['level']}（{supports[0]['desc']}）")
+    if resistances:
+        advice_parts.append(f"上方压力 {resistances[0]['level']}（{resistances[0]['desc']}）")
+    advice = "；".join(advice_parts) if advice_parts else "暂无明确信号，维持观望"
+
+    return {
+        "latest_close": round(latest_close, 2),
+        "cz_trend": cz_trend,
+        "wy_phase": wy_phase,
+        "supports": supports,
+        "resistances": resistances,
+        "signals": signals,
+        "advice": advice,
+    }
+
+
 @app.get("/api/analysis")
 async def get_analysis(
     timeframe: str = Query("day", description="周期：day/m30/m5/m1"),
@@ -1124,23 +1209,27 @@ async def get_analysis(
     for code in index_codes:
         cached = storage.get_index_kline(code, timeframe, fetch_limit.get(timeframe, 1000))
 
-        # 缓存不足则从数据源拉取并落库
-        if len(cached) < target.get(timeframe, 44):
+        # 缓存不足 或 缓存缺 amount（旧数据未存成交额）→ 重新拉取
+        has_amount = bool(cached) and cached[-1].get("amount")
+        if len(cached) < target.get(timeframe, 44) or not has_amount:
             try:
                 if timeframe == "day":
                     raw = kline([code], limit=250).get(code, [])
                     bars = [{"dt": b["date"], "open": b["open"], "high": b["high"],
-                             "low": b["low"], "close": b["close"], "vol": b.get("volume") or 0}
+                             "low": b["low"], "close": b["close"], "vol": b.get("volume") or 0,
+                             "amount": b.get("amount") or 0}
                             for b in raw if b.get("open") is not None]
                 else:
                     raw = fetch_index_mkline([code], timeframe, 800).get(code, [])
                     bars = [{"dt": b["date"], "open": b["open"], "high": b["high"],
-                             "low": b["low"], "close": b["close"], "vol": b.get("vol") or 0}
+                             "low": b["low"], "close": b["close"], "vol": b.get("vol") or 0,
+                             "amount": (b.get("vol") or 0) * 100 * (b.get("close") or 0)}
                             for b in raw]
                 if bars:
                     recs = [{"symbol": code, "timeframe": timeframe, "dt": b["dt"],
                              "open": b["open"], "high": b["high"], "low": b["low"],
-                             "close": b["close"], "vol": b["vol"], "updated_at": now_iso}
+                             "close": b["close"], "vol": b["vol"], "amount": b["amount"],
+                             "updated_at": now_iso}
                             for b in bars]
                     storage.upsert_index_kline(recs)
                     cached = bars
@@ -1148,7 +1237,8 @@ async def get_analysis(
                 logger.warning("analysis %s %s fetch failed: %s", code, timeframe, e)
 
         klines = [{"dt": b["dt"], "open": b["open"], "high": b["high"],
-                   "low": b["low"], "close": b["close"], "vol": b["vol"]} for b in cached]
+                   "low": b["low"], "close": b["close"], "vol": b.get("vol") or 0,
+                   "amount": b.get("amount") or 0} for b in cached]
         if len(klines) < 10:
             continue
         try:
@@ -1162,6 +1252,7 @@ async def get_analysis(
             "klines": klines,
             "chanlun": cz,
             "wyckoff": wy,
+            "summary": _build_market_summary(klines, cz, wy),
         }
 
     return result
