@@ -24,6 +24,7 @@ import AlertsTab from "./AlertsTab";
 import LimitUpTab from "./LimitUpTab";
 import MarketOverview from "./MarketOverview";
 import Review34Tab from "./Review34Tab";
+import AuctionTab from "./AuctionTab";
 import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect, fetchUserPrefs, saveUserPrefs, fetchConceptSectors, fetchConceptSectorsHistory, fetchSectorsHistory, fetchErrors, fetchWatchlist, addWatchlist, removeWatchlist, refreshConcepts, fetchSectorDailyHistory } from "./api";
 import AuthGuard from "./components/AuthGuard";
 
@@ -1453,6 +1454,11 @@ export default function App() {
               key: "review34",
               label: "连板",
               children: <Review34Tab gotoDaily={gotoDaily} />,
+            },
+            {
+              key: "auction",
+              label: "集合竞价",
+              children: <AuctionTab />,
             },
           ]}
         />

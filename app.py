@@ -1002,6 +1002,100 @@ async def get_review34(
     }
 
 
+def _auction_tier(chg: Optional[float]) -> str:
+    """竞价强度分档（对齐 Excel S5：超预期≥7% / 符合1~7% / 不及-4~1% / 大幅低开≤-4%）。"""
+    if chg is None:
+        return "未知"
+    if chg >= 7:
+        return "超预期"
+    if chg >= 1:
+        return "符合预期"
+    if chg >= -4:
+        return "不及预期"
+    return "大幅低开"
+
+
+@app.get("/api/auction")
+async def get_auction():
+    """集合竞价：竞价情绪总览 + 昨日涨停票竞价高开幅度 + 强度分档。
+
+    数据源：竞价高开幅度走腾讯 qt.gtimg.cn（竞价阶段最新价=竞价价、涨跌幅=高开幅度）；
+    全市场高开/低开家数走东财涨跌分布（进程内缓存）。竞价量/竞价金额依赖东财
+    push2.eastmoney.com（暂不可达），未纳入。
+    """
+    from trading_calendar import get_previous_trading_day
+    storage = get_storage()
+    today = date.today().strftime("%Y%m%d")
+
+    # 昨日涨停票（今日竞价观察标的）
+    prev_zt = []
+    prev_td = get_previous_trading_day(date.today())
+    if prev_td:
+        prev_zt = storage.get_limit_up_pool(prev_td.strftime("%Y%m%d"), "zt")
+
+    # 竞价高开幅度（腾讯批量查昨日涨停票）
+    quotes = {}
+    prev_codes = [r.get("code") for r in prev_zt if r.get("code")]
+    if prev_codes:
+        try:
+            from tencent_quote import fetch_stock_quotes
+            quotes = fetch_stock_quotes(prev_codes)
+        except Exception as e:
+            logger.warning("auction fetch_stock_quotes failed: %s", e)
+
+    stocks = []
+    tier_counter: Dict[str, int] = {}
+    for r in prev_zt:
+        code = r.get("code")
+        q = quotes.get(code)
+        chg = q.get("change_pct") if q else None
+        tier = _auction_tier(chg)
+        tier_counter[tier] = tier_counter.get(tier, 0) + 1
+        stocks.append({
+            "code": code,
+            "name": r.get("name"),
+            "lbc": r.get("lbc"),
+            "hybk": r.get("hybk"),
+            "auction_chg": chg,
+            "auction_price": q.get("price") if q else None,
+            "prev_close": q.get("prev_close") if q else None,
+            "tier": tier,
+        })
+    stocks.sort(key=lambda x: (x["auction_chg"] is None, -(x["auction_chg"] or 0)))
+
+    # 竞价情绪总览（东财涨跌分布，竞价阶段=高开/低开家数）
+    breadth = _get_market_breadth() or {}
+    up = breadth.get("up_count") or 0
+    down = breadth.get("down_count") or 0
+    if up + down == 0:
+        emotion = "无数据"
+    elif up >= down * 1.5:
+        emotion = "偏强"
+    elif down >= up * 1.5:
+        emotion = "偏弱"
+    else:
+        emotion = "中性"
+
+    return {
+        "trade_date": today,
+        "prev_trade_date": prev_td.strftime("%Y%m%d") if prev_td else None,
+        "market": {
+            "up_count": up,
+            "down_count": down,
+            "flat_count": breadth.get("flat_count"),
+            "up_down_ratio": breadth.get("up_down_ratio"),
+            "emotion": emotion,
+        },
+        "stocks": stocks,
+        "tier_dist": [
+            {"tier": "超预期", "count": tier_counter.get("超预期", 0)},
+            {"tier": "符合预期", "count": tier_counter.get("符合预期", 0)},
+            {"tier": "不及预期", "count": tier_counter.get("不及预期", 0)},
+            {"tier": "大幅低开", "count": tier_counter.get("大幅低开", 0)},
+        ],
+    }
+
+
 # ============================================================
 # 大盘概况：核心指数 + 市场情绪 + 资金面 + 强弱分布
 # ============================================================
