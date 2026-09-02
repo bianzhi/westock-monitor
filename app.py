@@ -979,6 +979,8 @@ async def get_review34(
             "seal_quality": seal_q,
             "fbt": r.get("fbt"),
             "zbc": zbc,
+            "zt_days": r.get("zt_days"),
+            "zt_ct": r.get("zt_ct"),
             "fund": fund,
             "fund_rate": fund_rate,
             "amount": amount,

@@ -162,6 +162,12 @@ export default function Review34Tab({ gotoDaily }) {
     },
     { title: "炸板次数", dataIndex: "zbc", key: "zbc", width: 90, sorter: (a, b) => (a.zbc ?? 0) - (b.zbc ?? 0), render: (v) => <span style={{ color: v >= 3 ? DOWN : undefined }}>{v}</span> },
     {
+      title: "连板统计", key: "ztstat", width: 100,
+      render: (_, r) => (r.zt_days != null || r.zt_ct != null)
+        ? `${r.zt_days ?? "-"}天${r.zt_ct ?? "-"}次`
+        : "-",
+    },
+    {
       title: "封单资金(亿)", dataIndex: "fund", key: "fund", width: 110,
       sorter: (a, b) => (a.fund ?? 0) - (b.fund ?? 0),
       render: (v) => (v != null ? (v / 1e8).toFixed(2) : "-"),
