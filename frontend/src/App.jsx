@@ -23,6 +23,7 @@ import DailyChart from "./DailyChart";
 import AlertsTab from "./AlertsTab";
 import LimitUpTab from "./LimitUpTab";
 import MarketOverview from "./MarketOverview";
+import Review34Tab from "./Review34Tab";
 import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect, fetchUserPrefs, saveUserPrefs, fetchConceptSectors, fetchConceptSectorsHistory, fetchSectorsHistory, fetchErrors, fetchWatchlist, addWatchlist, removeWatchlist, refreshConcepts, fetchSectorDailyHistory } from "./api";
 import AuthGuard from "./components/AuthGuard";
 
@@ -1447,6 +1448,11 @@ export default function App() {
               key: "limit-up",
               label: "涨停池",
               children: <LimitUpTab gotoDaily={gotoDaily} />,
+            },
+            {
+              key: "review34",
+              label: "连板",
+              children: <Review34Tab />,
             },
           ]}
         />

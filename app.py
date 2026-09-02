@@ -744,6 +744,256 @@ async def get_limit_up_summary(
 
 
 # ============================================================
+# 3进4复盘：大盘环境(S1) + 板块强度梯队(S2) + 个股3板筛选(S3)
+# 理念源自《3j4_复盘》套表：五层漏斗 + 量化评分自动判定
+# ============================================================
+
+def _judge_seal_quality(zbc: int, fbt: Optional[str]) -> tuple:
+    """封板质量判定（S3）：硬板/回封板/烂板，返回 (标签, 分值)。"""
+    zbc = zbc or 0
+    hhmm = int(str(fbt)[:4]) if fbt and str(fbt)[:4].isdigit() else 0
+    if zbc >= 3:
+        return "烂板", 0
+    if zbc >= 1:
+        return "回封板", 1
+    if hhmm and hhmm >= 1400:
+        return "烂板(尾盘)", 0
+    return "硬板", 2
+
+
+def _judge_ladder(counts: Dict[int, int]) -> tuple:
+    """梯队完整性（S2）：3+2+1完整=2分，缺2板=1分，独苗=0分。"""
+    has3 = counts.get(3, 0) > 0
+    has2 = counts.get(2, 0) > 0
+    has1 = counts.get(1, 0) > 0
+    if has3 and has2 and has1:
+        return "完整", 2
+    if has3 and has1 and not has2:
+        return "缺2板", 1
+    if has3 or has2 or has1:
+        return "独苗", 0
+    return "无", 0
+
+
+@app.get("/api/review34")
+async def get_review34(
+    date: Optional[str] = Query(None, description="YYYY-MM-DD，默认今天"),
+    stage: int = Query(3, ge=1, le=4, description="晋级阶段：1=1进2 / 2=2进3 / 3=3进4 / 4=4进5"),
+):
+    """连板晋级复盘综合数据：大盘环境 + 板块强度梯队 + N板个股筛选。
+
+    stage 指定 N 板（1进2/2进3/3进4/4进5），S3 筛选 lbc==stage 的个股；
+    S1 大盘环境 / S2 板块梯队为通用（不随 stage 变）。
+    数据源与涨停池同口径（沪深，不含北交所），只读落库表，不在请求路径
+    同步调外部接口；涨跌家数走进程内缓存的东财涨跌分布。
+    """
+    storage = get_storage()
+    trade_date = date.replace("-", "") if date else datetime.now().strftime("%Y%m%d")
+
+    zt_pool = storage.get_limit_up_pool(trade_date, "zt")
+    zb_pool = storage.get_limit_up_pool(trade_date, "zb")
+    summary = _build_limit_up_summary(trade_date)
+
+    # ---------- S1 大盘环境 ----------
+    r12 = r23 = r34 = r45 = None
+    for d in summary.get("lbc_dist", []):
+        n = d.get("n")
+        if n == 2:
+            r12 = d.get("rate")
+        elif n == 3:
+            r23 = d.get("rate")
+        elif n == 4:
+            r34 = d.get("rate")
+        elif n == 5:
+            r45 = d.get("rate")
+
+    seal_rate = summary.get("seal_rate")
+    zhap_rate = round(100 - seal_rate, 2) if seal_rate is not None else None
+    max_lbc = summary.get("max_lbc", 0)
+
+    # 情绪锚点判定：以 3进4 晋级率为核心锚点（Excel D列情绪锚点），
+    # 炸板率/最高连板作为辅助备注，不改变主判定。
+    notes = []
+    if r34 is None:
+        emotion_stage, action, pos = "数据不足", "观望", "空仓"
+        notes.append("3进4晋级率缺昨日数据")
+    elif r34 >= 50:
+        emotion_stage, action, pos = "主升/高潮", "积极做", "仓位可重(5成以上)"
+        notes.append(f"3进4晋级率{r34}%主升")
+    elif r34 >= 30:
+        emotion_stage, action, pos = "正常分歧", "精选个股", "控制仓位(3-5成)"
+        notes.append(f"3进4晋级率{r34}%正常分歧")
+    elif r34 >= 20:
+        emotion_stage, action, pos = "偏弱", "谨慎-只做最强", "轻仓试错(2-3成)"
+        notes.append(f"3进4晋级率{r34}%偏弱")
+    else:
+        emotion_stage, action, pos = "退潮", "不做", "空仓/1成以下"
+        notes.append(f"3进4晋级率{r34}%退潮")
+
+    # 辅助信号（仅备注，不改变主判定）
+    if zhap_rate is not None:
+        if zhap_rate < 20:
+            notes.append(f"炸板率{zhap_rate}%情绪极好")
+        elif zhap_rate <= 28:
+            notes.append(f"炸板率{zhap_rate}%正常分歧")
+        elif zhap_rate <= 40:
+            notes.append(f"炸板率{zhap_rate}%偏弱")
+        else:
+            notes.append(f"炸板率{zhap_rate}%情绪差")
+    if max_lbc >= 6:
+        notes.append(f"最高{max_lbc}板空间打开")
+    elif max_lbc >= 4:
+        notes.append(f"最高{max_lbc}板冲击高度")
+    else:
+        notes.append(f"最高{max_lbc}板破局板")
+
+    breadth = _get_market_breadth() or {}
+    market = {
+        "limit_up_count": summary.get("limit_up_count"),
+        "zhap_ban_count": summary.get("zhap_ban_count"),
+        "limit_down_count": summary.get("limit_down_count"),
+        "seal_rate": seal_rate,
+        "zhap_rate": zhap_rate,
+        "max_lbc": max_lbc,
+        "promotion": {"r12": r12, "r23": r23, "r34": r34, "r45": r45},
+        "up_count": breadth.get("up_count"),
+        "down_count": breadth.get("down_count"),
+        "up_down_ratio": breadth.get("up_down_ratio"),
+        "emotion_stage": emotion_stage,
+        "action_advice": action,
+        "position_advice": pos,
+        "score": r34,
+        "notes": notes,
+    }
+
+    # ---------- S2 板块强度梯队 ----------
+    sector_map: Dict[str, Dict] = {}
+    for r in zt_pool:
+        h = r.get("hybk") or "其他"
+        sector_map.setdefault(h, {"name": h, "zt": [], "zb": 0})["zt"].append(r)
+    for r in zb_pool:
+        h = r.get("hybk") or "其他"
+        sector_map.setdefault(h, {"name": h, "zt": [], "zb": 0})["zb"] += 1
+
+    sectors = []
+    for h, d in sector_map.items():
+        zts = d["zt"]
+        zb_n = d["zb"]
+        zt_n = len(zts)
+        lbc_counts: Dict[int, int] = {}
+        total_inflow = total_turnover = 0.0
+        for r in zts:
+            lbc = r.get("lbc") or 0
+            lbc_counts[lbc] = lbc_counts.get(lbc, 0) + 1
+            total_inflow += r.get("main_net_inflow") or 0
+            total_turnover += r.get("amount") or 0
+        touch = zt_n + zb_n
+        zhap_r = round(zb_n / touch * 100, 1) if touch else 0
+        ladder_label, ladder_score = _judge_ladder(lbc_counts)
+        fund_strength = round(total_inflow / total_turnover * 100, 2) if total_turnover else None
+
+        # 板块评分（可自动算维度满分7：涨停家数2 + 炸板率2 + 梯队2 + 资金强度1；
+        # 中军涨幅2 + 题材催化1 需人工判断，未计）
+        s_zt = 2 if zt_n > 5 else (1 if zt_n >= 3 else 0)
+        s_zhap = 2 if zhap_r < 20 else (1 if zhap_r <= 40 else 0)
+        s_fund = 1 if (fund_strength or 0) > 8 else (0.5 if (fund_strength or 0) >= 5 else 0)
+        pscore = s_zt + s_zhap + ladder_score + s_fund
+        score_detail = [
+            {"label": "涨停家数", "score": s_zt, "max": 2, "desc": f"{zt_n}家"},
+            {"label": "炸板率", "score": s_zhap, "max": 2, "desc": f"{zhap_r}%"},
+            {"label": "梯队", "score": ladder_score, "max": 2, "desc": ladder_label},
+            {"label": "资金强度", "score": s_fund, "max": 1, "desc": f"{fund_strength}%"},
+            {"label": "待补(人工)", "score": None, "max": 3, "desc": "中军涨幅2 + 题材催化1"},
+        ]
+        sectors.append({
+            "name": h,
+            "limit_up_count": zt_n,
+            "zhap_count": zb_n,
+            "zhap_rate": zhap_r,
+            "lbc_dist": {
+                "5+": sum(v for k, v in lbc_counts.items() if k >= 5),
+                "4": lbc_counts.get(4, 0),
+                "3": lbc_counts.get(3, 0),
+                "2": lbc_counts.get(2, 0),
+                "1": lbc_counts.get(1, 0),
+            },
+            "ladder": ladder_label,
+            "main_net_inflow": round(total_inflow, 2),
+            "turnover": round(total_turnover, 2),
+            "fund_strength": fund_strength,
+            "score": round(pscore, 1),
+            "score_detail": score_detail,
+            "is_main": pscore >= 5,
+        })
+    sectors.sort(key=lambda x: (-x["limit_up_count"], -(x["score"] or 0)))
+
+    # ---------- S3 个股 N 板筛选（stage 指定 N：1进2/2进3/3进4/4进5） ----------
+    stocks = []
+    for r in zt_pool:
+        if (r.get("lbc") or 0) != stage:
+            continue
+        zbc = r.get("zbc") or 0
+        seal_q, seal_s = _judge_seal_quality(zbc, r.get("fbt"))
+        hs = r.get("turnover_rate")
+        s_hs = 1 if (hs is not None and 18 <= hs <= 32) else (0.5 if (hs is not None and 10 <= hs <= 40) else 0)
+        # 综合评分（可自动算部分满分3：封板质量2 + 换手1；量能/公告/筹码/
+        # 历史大面/次日溢价共6分需人工判断，未计）
+        sscore = seal_s + s_hs
+        # 入选判定：炸板≥3一票否决；硬板初筛通过；回封板观察；烂板剔除
+        reject = zbc >= 3
+        if reject:
+            verdict, selected = "否决", False
+        elif seal_q == "硬板":
+            verdict, selected = "初筛通过", True
+        elif seal_q == "回封板":
+            verdict, selected = "观察", False
+        else:
+            verdict, selected = "剔除", False
+        score_detail = [
+            {"label": "封板质量", "score": seal_s, "max": 2, "desc": seal_q},
+            {"label": "换手判定", "score": s_hs, "max": 1, "desc": f"换手{hs}%"},
+            {"label": "炸板否决", "score": 0, "max": 0,
+             "desc": f"炸板{zbc}次" + ("(≥3强制否决)" if reject else "(未触发)")},
+            {"label": "待补(人工)", "score": None, "max": 6,
+             "desc": "量能/公告/筹码/历史大面/次日溢价"},
+        ]
+        # 封单率 = 封单资金/流通市值；净额率 = 主力净流入/成交额（现算，不落库）
+        fund = r.get("fund")
+        ltsz = r.get("ltsz")
+        fund_rate = round(fund / ltsz * 100, 2) if fund and ltsz else None
+        amount = r.get("amount")
+        main_net_inflow = r.get("main_net_inflow")
+        net_rate = round(main_net_inflow / amount * 100, 2) if main_net_inflow is not None and amount else None
+        stocks.append({
+            "code": r.get("code"),
+            "name": r.get("name"),
+            "hybk": r.get("hybk"),
+            "ltsz_yi": round((ltsz or 0) / 1e8, 2),
+            "turnover_rate": hs,
+            "seal_quality": seal_q,
+            "zbc": zbc,
+            "fund": fund,
+            "fund_rate": fund_rate,
+            "amount": amount,
+            "main_net_inflow": main_net_inflow,
+            "net_rate": net_rate,
+            "score": round(sscore, 1),
+            "score_detail": score_detail,
+            "verdict": verdict,
+            "selected": selected,
+            "reject_reason": "炸板≥3次一票否决" if reject else None,
+        })
+    stocks.sort(key=lambda x: -(x["score"] or 0))
+
+    return {
+        "trade_date": trade_date,
+        "market": market,
+        "sectors": sectors,
+        "stocks": stocks,
+    }
+
+
+# ============================================================
 # 大盘概况：核心指数 + 市场情绪 + 资金面 + 强弱分布
 # ============================================================
 # 指数行情进程内缓存（腾讯接口免费但不宜高频打爆，交易时段 5s 一刷足够）
