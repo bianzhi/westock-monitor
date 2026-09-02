@@ -25,6 +25,7 @@ import LimitUpTab from "./LimitUpTab";
 import MarketOverview from "./MarketOverview";
 import Review34Tab from "./Review34Tab";
 import AuctionTab from "./AuctionTab";
+import AnalysisTab from "./AnalysisTab";
 import { fetchMinuteCompare, focusMinuteCollect, unfocusMinuteCollect, fetchUserPrefs, saveUserPrefs, fetchConceptSectors, fetchConceptSectorsHistory, fetchSectorsHistory, fetchErrors, fetchWatchlist, addWatchlist, removeWatchlist, refreshConcepts, fetchSectorDailyHistory } from "./api";
 import AuthGuard from "./components/AuthGuard";
 
@@ -1459,6 +1460,11 @@ export default function App() {
               key: "auction",
               label: "集合竞价",
               children: <AuctionTab />,
+            },
+            {
+              key: "analysis",
+              label: "缠论威科夫",
+              children: <AnalysisTab />,
             },
           ]}
         />

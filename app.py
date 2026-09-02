@@ -1096,6 +1096,58 @@ async def get_auction():
     }
 
 
+@app.get("/api/analysis")
+async def get_analysis():
+    """大盘指数缠论 + 威科夫量价分析。
+
+    数据源：westock kline（指数日K，含 OHLCV），近 60 个交易日。
+    缠论：分型/笔/中枢/买卖点；威科夫：量价努力/阶段/供需。
+    """
+    from westock import kline
+    import chanlun
+    import wyckoff
+
+    index_codes = ["sh000001", "sz399001", "sz399006"]
+    names = {"sh000001": "上证指数", "sz399001": "深证成指", "sz399006": "创业板指"}
+
+    try:
+        daily = kline(index_codes, limit=60)
+    except Exception as e:
+        logger.warning("analysis kline failed: %s", e)
+        daily = {}
+
+    result = {}
+    for code, bars in daily.items():
+        if not bars:
+            continue
+        klines = []
+        for b in bars:
+            if b.get("open") is None or b.get("high") is None:
+                continue
+            klines.append({
+                "dt": b.get("date") or "",
+                "open": b["open"], "high": b["high"],
+                "low": b["low"], "close": b["close"],
+                "vol": b.get("volume") or 0,
+            })
+        if len(klines) < 10:
+            continue
+        try:
+            cz = chanlun.analyze(klines)
+            wy = wyckoff.analyze(klines)
+        except Exception as e:
+            logger.warning("analysis %s failed: %s", code, e)
+            continue
+        result[code] = {
+            "name": names.get(code, code),
+            "klines": klines,
+            "chanlun": cz,
+            "wyckoff": wy,
+        }
+
+    return result
+
+
 # ============================================================
 # 大盘概况：核心指数 + 市场情绪 + 资金面 + 强弱分布
 # ============================================================

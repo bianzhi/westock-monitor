@@ -63,6 +63,9 @@ export const fetchReview34 = (date, stage) =>
 export const fetchAuction = () =>
   api.get("/auction").then((r) => r.data);
 
+export const fetchAnalysis = () =>
+  api.get("/analysis").then((r) => r.data);
+
 // 大盘概况：核心指数 + 市场情绪 + 资金面 + 强弱分布
 export const fetchMarketOverview = () =>
   api.get("/market-overview").then((r) => r.data);
